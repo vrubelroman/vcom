@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -72,6 +73,18 @@ type opMsg struct {
 	err        error
 }
 
+type mouseClickState struct {
+	pane  PaneID
+	index int
+	at    time.Time
+}
+
+type hoverState struct {
+	pane  PaneID
+	index int
+	ok    bool
+}
+
 type Model struct {
 	cfg        config.Config
 	configPath string
@@ -93,6 +106,9 @@ type Model struct {
 	modal  modalState
 	status string
 	busy   bool
+
+	lastClick mouseClickState
+	hover     hoverState
 }
 
 func NewModel(cfg config.Config, configPath string) (Model, error) {
@@ -195,10 +211,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Created %s", msg.targetPath)
 		case opEdit:
 			m.status = "Editor closed"
-			return m, m.loadPreviewCmd()
+			return m, tea.Batch(m.loadPreviewCmd(), enableMouseCmd())
 		case opView:
 			m.status = "Viewer closed"
-			return m, nil
+			return m, enableMouseCmd()
 		}
 
 		activeSelection := selectedName(m.activePane())
@@ -247,11 +263,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.moveCursor(max(m.bodyHeight()-6, 5))
 			return m, m.loadPreviewCmd()
 		case key.Matches(msg, m.keys.Open):
-			if err := m.enterSelected(); err != nil {
-				m.status = err.Error()
-				return m, nil
-			}
-			return m, m.loadPreviewCmd()
+			return m.handleOpenSelected()
 		case key.Matches(msg, m.keys.Back):
 			if err := m.goParent(); err != nil {
 				m.status = err.Error()
@@ -271,6 +283,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Delete):
 			return m.handleDelete()
 		}
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	}
 
 	return m, nil
@@ -293,7 +308,7 @@ func (m Model) View() string {
 		if m.active == PaneLeft {
 			panels = lipgloss.JoinHorizontal(
 				lipgloss.Top,
-				renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, true),
+				renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, true, m.hoverIndexFor(PaneLeft)),
 				gap,
 				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight),
 			)
@@ -302,15 +317,15 @@ func (m Model) View() string {
 				lipgloss.Top,
 				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight),
 				gap,
-				renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, true),
+				renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, true, m.hoverIndexFor(PaneRight)),
 			)
 		}
 	} else {
 		panels = lipgloss.JoinHorizontal(
 			lipgloss.Top,
-			renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, m.active == PaneLeft),
+			renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, m.active == PaneLeft, m.hoverIndexFor(PaneLeft)),
 			gap,
-			renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, m.active == PaneRight),
+			renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, m.active == PaneRight, m.hoverIndexFor(PaneRight)),
 		)
 	}
 
@@ -408,9 +423,11 @@ func (m *Model) refreshAllPanes(status string) (tea.Model, tea.Cmd) {
 func (m *Model) moveCursor(delta int) {
 	pane := m.activePane()
 	pane.Move(delta, max(m.bodyHeight()-4, 1))
+	m.hover = hoverState{}
 }
 
 func (m *Model) enterSelected() error {
+	m.hover = hoverState{}
 	pane := m.activePane()
 	selected, ok := pane.Selected()
 	if !ok {
@@ -429,7 +446,28 @@ func (m *Model) enterSelected() error {
 	return nil
 }
 
+func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
+	selected, ok := m.activePane().Selected()
+	if !ok {
+		return m, nil
+	}
+
+	if selected.IsDir {
+		if err := m.enterSelected(); err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		return m, m.loadPreviewCmd()
+	}
+
+	if isEditableEntry(selected) {
+		return m.handleEdit()
+	}
+	return m.handleOpenExternal()
+}
+
 func (m *Model) goParent() error {
+	m.hover = hoverState{}
 	pane := m.activePane()
 	parent := filepath.Dir(pane.Path)
 	if parent == pane.Path {
@@ -573,6 +611,25 @@ func (m *Model) handleView() (tea.Model, tea.Cmd) {
 	})
 }
 
+func (m *Model) handleOpenExternal() (tea.Model, tea.Cmd) {
+	selected, ok := m.activePane().Selected()
+	if !ok || selected.IsParent || selected.IsDir {
+		m.status = "Select a file to open"
+		return m, nil
+	}
+
+	command, name, err := externalCommand("", []string{"xdg-open", "open"}, selected.Path)
+	if err != nil {
+		m.status = "No system opener found (tried xdg-open/open)"
+		return m, nil
+	}
+
+	m.status = fmt.Sprintf("Opening %s with %s", selected.DisplayName(), name)
+	return m, tea.ExecProcess(command, func(err error) tea.Msg {
+		return opMsg{kind: opView, sourcePath: selected.Path, err: err}
+	})
+}
+
 func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
 	selected, ok := m.activePane().Selected()
 	if !ok || selected.IsParent || selected.IsDir {
@@ -580,9 +637,9 @@ func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	command, name, err := externalCommand("EDITOR", []string{"nvim", "vim", "vi", "nano"}, selected.Path)
+	command, name, err := externalCommandFromEnv([]string{"VISUAL", "EDITOR"}, []string{"nvim", "vim", "vi", "nano"}, selected.Path)
 	if err != nil {
-		m.status = "Set $EDITOR or install nvim/vim/vi/nano to enable F4 editing"
+		m.status = "Set $VISUAL/$EDITOR or install nvim/vim/vi/nano to enable F4 editing"
 		return m, nil
 	}
 
@@ -590,6 +647,89 @@ func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
 	return m, tea.ExecProcess(command, func(err error) tea.Msg {
 		return opMsg{kind: opEdit, sourcePath: selected.Path, err: err}
 	})
+}
+
+func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Action == tea.MouseActionMotion:
+		paneID, index, ok := m.mouseTarget(msg.X, msg.Y)
+		if ok {
+			m.hover = hoverState{pane: paneID, index: index, ok: true}
+		} else {
+			m.hover = hoverState{}
+		}
+		return m, nil
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
+		if m.infoMode && m.mouseOverPreview(msg.X, msg.Y) {
+			m.previewModel.LineUp(3)
+			return m, nil
+		}
+		m.moveCursor(-1)
+		return m, m.loadPreviewCmd()
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
+		if m.infoMode && m.mouseOverPreview(msg.X, msg.Y) {
+			m.previewModel.LineDown(3)
+			return m, nil
+		}
+		m.moveCursor(1)
+		return m, m.loadPreviewCmd()
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		paneID, index, ok := m.mouseTarget(msg.X, msg.Y)
+		if !ok {
+			return m, nil
+		}
+		m.hover = hoverState{pane: paneID, index: index, ok: true}
+		m.active = paneID
+		pane := m.paneByID(paneID)
+		if index >= 0 && index < len(pane.Entries) {
+			pane.Cursor = index
+			pane.EnsureVisible(max(m.bodyHeight()-4, 1))
+		}
+
+		now := time.Now()
+		doubleClick := m.lastClick.pane == paneID && m.lastClick.index == index && now.Sub(m.lastClick.at) <= 450*time.Millisecond
+		m.lastClick = mouseClickState{pane: paneID, index: index, at: now}
+		if doubleClick {
+			return m.handleOpenSelected()
+		}
+		m.status = fmt.Sprintf("Selected %s pane", strings.ToUpper(string(paneID)))
+		return m, m.loadPreviewCmd()
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonRight:
+		if m.infoMode && m.mouseOverPreview(msg.X, msg.Y) {
+			m.infoMode = false
+			m.resizePreview()
+			m.syncPreviewContent()
+			m.status = "Info mode: off"
+			return m, nil
+		}
+
+		paneID, index, ok := m.mouseTarget(msg.X, msg.Y)
+		if !ok {
+			return m, nil
+		}
+
+		if m.infoMode && paneID == m.active && index == m.activePane().Cursor {
+			m.infoMode = false
+			m.hover = hoverState{pane: paneID, index: index, ok: true}
+			m.status = "Info mode: off"
+			return m, nil
+		}
+
+		m.hover = hoverState{pane: paneID, index: index, ok: true}
+		m.active = paneID
+		pane := m.paneByID(paneID)
+		if index >= 0 && index < len(pane.Entries) {
+			pane.Cursor = index
+			pane.EnsureVisible(max(m.bodyHeight()-4, 1))
+		}
+		m.infoMode = true
+		m.resizePreview()
+		m.syncPreviewContent()
+		m.status = fmt.Sprintf("Info mode: %s selection", strings.ToUpper(string(paneID)))
+		return m, m.loadPreviewCmd()
+	default:
+		return m, nil
+	}
 }
 
 func (m *Model) toggleInfo() (tea.Model, tea.Cmd) {
@@ -774,27 +914,34 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 }
 
 func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int) string {
-	rows := []string{
+	leftRows := []string{
 		fmt.Sprintf("kind: %s", fallback(meta.Kind, "n/a")),
 		fmt.Sprintf("size: %s", metaSize(meta)),
 		fmt.Sprintf("created: %s", fallback(meta.CreatedAt, "n/a")),
+	}
+	rightRows := []string{
 		fmt.Sprintf("modified: %s", fallback(meta.ModifiedAt, "n/a")),
 		fmt.Sprintf("mode: %s", fallback(meta.Permissions, "n/a")),
 	}
 	if meta.ImageFormat != "" {
-		rows = append(rows, fmt.Sprintf("image: %s %s", meta.ImageFormat, meta.ImageSize))
+		rightRows = append(rightRows, fmt.Sprintf("image: %s %s", meta.ImageFormat, meta.ImageSize))
 	}
-	rows = append(rows, fmt.Sprintf("path: %s", truncateMiddle(meta.Path, max(width-10, 12))))
 
 	leftWidth := max(width/2, 18)
+	rightWidth := max(width-leftWidth, 18)
 	left := lipgloss.NewStyle().
 		Width(leftWidth).
 		Foreground(palette.Muted).
-		Render(strings.Join(rows[:min(3, len(rows))], "\n"))
+		Render(strings.Join(leftRows, "\n"))
 	right := lipgloss.NewStyle().
-		Width(width - leftWidth).
+		Width(rightWidth).
 		Foreground(palette.Text).
-		Render(strings.Join(rows[min(3, len(rows)):], "\n"))
+		Render(strings.Join(rightRows, "\n"))
+
+	pathLine := lipgloss.NewStyle().
+		Width(width).
+		Foreground(palette.Text).
+		Render(fmt.Sprintf("path: %s", truncateMiddle(meta.Path, max(width-8, 16))))
 
 	return lipgloss.NewStyle().
 		Width(width).
@@ -803,7 +950,12 @@ func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int) string 
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderBottom(true).
 		BorderForeground(palette.Border).
-		Render(lipgloss.JoinHorizontal(lipgloss.Top, left, right))
+		Render(lipgloss.JoinVertical(
+			lipgloss.Left,
+			lipgloss.JoinHorizontal(lipgloss.Top, left, right),
+			"",
+			pathLine,
+		))
 }
 
 func renderTitleBar(m Model) string {
@@ -1052,26 +1204,52 @@ func operationVerb(kind fileOpKind) string {
 }
 
 func externalCommand(envVar string, fallbacks []string, path string) (*exec.Cmd, string, error) {
-	commandLine := strings.TrimSpace(os.Getenv(envVar))
+	envVars := []string{}
+	if envVar != "" {
+		envVars = append(envVars, envVar)
+	}
+	return externalCommandFromEnv(envVars, fallbacks, path)
+}
+
+func externalCommandFromEnv(envVars []string, fallbacks []string, path string) (*exec.Cmd, string, error) {
+	commandLine := ""
+	source := "fallbacks"
+	for _, envVar := range envVars {
+		commandLine = strings.TrimSpace(os.Getenv(envVar))
+		if commandLine != "" {
+			source = envVar
+			break
+		}
+	}
 	if commandLine == "" {
 		for _, candidate := range fallbacks {
 			if resolved, err := exec.LookPath(candidate); err == nil {
 				commandLine = resolved
+				source = candidate
 				break
 			}
 		}
 	}
 	if commandLine == "" {
-		return nil, "", fmt.Errorf("no command for %s", envVar)
+		if len(envVars) > 0 {
+			return nil, "", fmt.Errorf("no command for %s", strings.Join(envVars, "/"))
+		}
+		return nil, "", fmt.Errorf("no fallback command found")
 	}
 
 	parts := strings.Fields(commandLine)
 	if len(parts) == 0 {
-		return nil, "", fmt.Errorf("invalid command for %s", envVar)
+		return nil, "", fmt.Errorf("invalid command for %s", source)
 	}
 
 	args := append(parts[1:], path)
 	return exec.Command(parts[0], args...), filepath.Base(parts[0]), nil
+}
+
+func enableMouseCmd() tea.Cmd {
+	return func() tea.Msg {
+		return tea.EnableMouseCellMotion()
+	}
 }
 
 func resolveStartPath(raw string, fallback string) (string, error) {
@@ -1112,4 +1290,100 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m *Model) mouseTarget(x, y int) (PaneID, int, bool) {
+	if m.width <= 0 || m.height <= 0 {
+		return "", 0, false
+	}
+
+	leftWidth, previewWidth, rightWidth := m.layoutWidths()
+	top := 0
+	if m.cfg.UI.ShowTitleBar {
+		top++
+	}
+	bodyHeight := m.bodyHeight()
+	if y < top || y >= top+bodyHeight {
+		return "", 0, false
+	}
+
+	gap := m.cfg.UI.PaneGap
+	leftStart := 0
+	rightStart := leftWidth + gap
+	if m.infoMode && m.active == PaneRight {
+		rightStart = previewWidth + gap
+	}
+
+	switch {
+	case x >= leftStart && x < leftStart+leftWidth:
+		if m.infoMode && m.active == PaneRight {
+			return "", 0, false
+		}
+		return PaneLeft, paneIndexFromMouse(y-top, bodyHeight, &m.left), true
+	case x >= rightStart && x < rightStart+rightWidth:
+		if m.infoMode && m.active == PaneLeft {
+			return "", 0, false
+		}
+		return PaneRight, paneIndexFromMouse(y-top, bodyHeight, &m.right), true
+	default:
+		return "", 0, false
+	}
+}
+
+func paneIndexFromMouse(localY int, height int, pane *BrowserPane) int {
+	if localY < 1 || localY >= height-1 {
+		return pane.Cursor
+	}
+	row := localY - 1
+	index := pane.Offset + row
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(pane.Entries) {
+		index = len(pane.Entries) - 1
+	}
+	if index < 0 {
+		return 0
+	}
+	return index
+}
+
+func isEditableEntry(entry vfs.Entry) bool {
+	switch entry.Category() {
+	case "text", "config", "executable":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Model) hoverIndexFor(pane PaneID) int {
+	if m.hover.ok && m.hover.pane == pane {
+		return m.hover.index
+	}
+	return -1
+}
+
+func (m *Model) mouseOverPreview(x, y int) bool {
+	if !m.infoMode || m.width <= 0 || m.height <= 0 {
+		return false
+	}
+
+	leftWidth, previewWidth, _ := m.layoutWidths()
+	top := 0
+	if m.cfg.UI.ShowTitleBar {
+		top++
+	}
+	bodyHeight := m.bodyHeight()
+	if y < top || y >= top+bodyHeight {
+		return false
+	}
+
+	gap := m.cfg.UI.PaneGap
+	if m.active == PaneLeft {
+		startX := leftWidth + gap
+		return x >= startX && x < startX+previewWidth
+	}
+
+	return x >= 0 && x < previewWidth
 }

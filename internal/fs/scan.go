@@ -227,6 +227,13 @@ func ShortTime(t time.Time) string {
 	return t.Format("2006-01-02 15:04")
 }
 
+func CompactTime(t time.Time) string {
+	if t.IsZero() {
+		return "n/a"
+	}
+	return t.Format("01-02 15:04")
+}
+
 func Permissions(mode fs.FileMode) string {
 	return mode.String()
 }
