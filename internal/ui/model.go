@@ -906,10 +906,12 @@ func (m *Model) resizePreview() {
 	_, previewWidth, _ := m.layoutWidths()
 	metaHeight := 0
 	if m.cfg.Preview.ShowMetadata {
-		metaHeight = 6
+		metaHeight = 7
 	}
-	m.previewModel.Width = max(previewWidth-4, 10)
-	m.previewModel.Height = max(m.bodyHeight()-metaHeight-4, 3)
+	innerWidth := max(previewWidth-2, 1)
+	innerHeight := max(m.bodyHeight()-2, 1)
+	m.previewModel.Width = max(innerWidth-2, 10)
+	m.previewModel.Height = max(innerHeight-metaHeight-3, 3)
 }
 
 func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg config.Config, palette theme.Palette, width int, height int) string {
@@ -933,10 +935,16 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 		Render("PREVIEW " + previewIcon(preview) + " " + preview.Title)
 
 	parts := []string{title}
+	usedHeight := lipgloss.Height(title)
 	if cfg.Preview.ShowMetadata {
-		parts = append(parts, renderMetadata(preview.Metadata, palette, innerWidth))
+		metaView := renderMetadata(preview.Metadata, palette, innerWidth)
+		parts = append(parts, metaView)
+		usedHeight += lipgloss.Height(metaView)
 	}
-	parts = append(parts, renderPreviewContent(viewportModel, palette, innerWidth))
+	contentHeight := max(innerHeight-usedHeight, 3)
+	viewportModel.Width = max(innerWidth-2, 10)
+	viewportModel.Height = max(contentHeight-3, 1)
+	parts = append(parts, renderPreviewContent(viewportModel, palette, innerWidth, contentHeight))
 
 	return box.Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
@@ -1046,7 +1054,7 @@ func renderStatus(m Model) string {
 
 func renderFooter(m Model) string {
 	helpModel := m.helpModel
-	helpModel.Width = max(m.width-28, 20)
+	helpModel.Width = max(m.width-4, 20)
 	helpView := helpModel.View(m.keys)
 	modeLabel := ""
 	if m.selectMode {
@@ -1055,14 +1063,11 @@ func renderFooter(m Model) string {
 			Bold(true).
 			Render("  SELECT TEXT MODE")
 	}
-	legend := lipgloss.NewStyle().
-		Foreground(m.palette.Muted).
-		Render(" dir  󰈙 text   config  󰆍 exec  󰋩 image  󰈔 bin")
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Padding(0, 1).
 		Background(m.palette.Panel).
-		Render(lipgloss.JoinHorizontal(lipgloss.Top, helpView, modeLabel, "   ", legend))
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, helpView, modeLabel))
 }
 
 func renderModal(modal modalState, palette theme.Palette, width int) string {
@@ -1097,7 +1102,9 @@ func overlayCenter(base string, overlay string, width int) string {
 	return base + "\n" + centered
 }
 
-func renderPreviewContent(viewportModel *viewport.Model, palette theme.Palette, width int) string {
+func renderPreviewContent(viewportModel *viewport.Model, palette theme.Palette, width int, height int) string {
+	innerHeight := max(height-1, 1)
+
 	header := lipgloss.NewStyle().
 		Width(width).
 		Padding(0, 1).
@@ -1108,12 +1115,14 @@ func renderPreviewContent(viewportModel *viewport.Model, palette theme.Palette, 
 
 	body := lipgloss.NewStyle().
 		Width(width).
+		Height(max(innerHeight-lipgloss.Height(header), 1)).
 		Padding(0, 1).
 		Background(palette.Panel).
 		Render(viewportModel.View())
 
 	return lipgloss.NewStyle().
 		Width(width).
+		Height(innerHeight).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderTop(true).
 		BorderForeground(palette.Border).
@@ -1380,10 +1389,11 @@ func (m *Model) mouseTarget(x, y int) (PaneID, int, bool) {
 }
 
 func paneIndexFromMouse(localY int, height int, pane *BrowserPane) (int, bool) {
-	if localY < 1 || localY >= height-1 {
+	const listStartY = 3
+	if localY < listStartY || localY >= height-1 {
 		return 0, false
 	}
-	row := localY - 1
+	row := localY - listStartY
 	index := pane.Offset + row
 	if index < 0 {
 		index = 0
