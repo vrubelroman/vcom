@@ -108,6 +108,7 @@ func renderPane(
 
 	borderColor := palette.Border
 	headerBg := palette.PanelInactive
+	bodyBg := palette.Panel
 	if active {
 		borderColor = palette.BorderActive
 		headerBg = palette.Selection
@@ -119,17 +120,18 @@ func renderPane(
 	box := lipgloss.NewStyle().
 		Width(innerWidth).
 		Height(innerHeight).
-		Background(palette.PanelInactive).
+		Background(bodyBg).
 		Foreground(palette.Text).
 		BorderStyle(borderStyle(cfg.UI.Border)).
-		BorderForeground(borderColor)
+		BorderForeground(borderColor).
+		BorderBackground(bodyBg)
 
 	header := lipgloss.NewStyle().
 		Render(renderPaneHeader(pane, cfg, palette, innerWidth, active, headerBg))
 
 	rowsHeight := max(innerHeight-2, 1)
-	headerRow := renderColumnsHeader(cfg, innerWidth, palette)
-	rows := renderPaneRows(pane, cfg, palette, innerWidth, rowsHeight, active, hoverIndex)
+	headerRow := renderColumnsHeader(cfg, innerWidth, palette, bodyBg)
+	rows := renderPaneRows(pane, cfg, palette, innerWidth, rowsHeight, active, hoverIndex, bodyBg)
 	content := lipgloss.JoinVertical(lipgloss.Left, header, headerRow, rows)
 	return box.Render(content)
 }
@@ -147,6 +149,10 @@ func renderPaneHeader(pane BrowserPane, cfg config.Config, palette theme.Palette
 
 	labelView := labelStyle.Render(label)
 	pathWidth := max(width-lipgloss.Width(labelView)-1, 4)
+	spacer := lipgloss.NewStyle().
+		Width(1).
+		Background(headerBg).
+		Render(" ")
 	pathStyle := lipgloss.NewStyle().
 		Width(pathWidth).
 		Background(headerBg).
@@ -156,37 +162,39 @@ func renderPaneHeader(pane BrowserPane, cfg config.Config, palette theme.Palette
 	return lipgloss.NewStyle().
 		Width(width).
 		Background(headerBg).
-		Render(labelView + " " + pathStyle.Render(truncateMiddle(compactPath(pane.Path, cfg.UI.PathDisplay), pathWidth)))
+		Render(labelView + spacer + pathStyle.Render(truncateMiddle(compactPath(pane.Path, cfg.UI.PathDisplay), pathWidth)))
 }
 
-func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette) string {
+func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, background lipgloss.Color) string {
 	columns := buildColumns(cfg, width)
 	parts := make([]string, 0, len(columns))
 	for idx, column := range columns {
 		style := lipgloss.NewStyle().
 			Width(column.Width).
 			Foreground(palette.Muted).
+			Background(background).
 			Bold(true)
 		if column.AlignRight {
 			style = style.Align(lipgloss.Right)
 		}
 		parts = append(parts, style.Render(truncateRight(column.Title, column.Width)))
 		if idx < len(columns)-1 {
-			parts = append(parts, columnSeparator(column.Key, palette, lipgloss.Color("")))
+			parts = append(parts, columnSeparator(column.Key, palette, background))
 		}
 	}
 	return lipgloss.NewStyle().
 		Width(width).
-		Background(palette.Panel).
+		Background(background).
 		Render(strings.Join(parts, ""))
 }
 
-func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, width int, height int, active bool, hoverIndex int) string {
+func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, width int, height int, active bool, hoverIndex int, background lipgloss.Color) string {
 	if len(pane.Entries) == 0 {
 		return lipgloss.NewStyle().
 			Width(width).
 			Height(height).
 			Padding(1, 1).
+			Background(background).
 			Foreground(palette.Muted).
 			Render("Empty directory")
 	}
@@ -198,21 +206,22 @@ func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, 
 	lines := make([]string, 0, visibleHeight)
 	for idx := pane.Offset; idx < end; idx++ {
 		entry := pane.Entries[idx]
-		row := renderEntryRow(entry, cfg, width, idx == pane.Cursor, idx == hoverIndex, active, palette)
+		row := renderEntryRow(entry, cfg, width, idx == pane.Cursor, idx == hoverIndex, active, palette, background)
 		lines = append(lines, row)
 	}
 	for len(lines) < visibleHeight {
-		lines = append(lines, lipgloss.NewStyle().Width(width).Render(""))
+		lines = append(lines, lipgloss.NewStyle().Width(width).Background(background).Render(""))
 	}
 
 	return lipgloss.NewStyle().
 		Width(width).
+		Background(background).
 		Render(strings.Join(lines, "\n"))
 }
 
-func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool, hovered bool, active bool, palette theme.Palette) string {
+func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool, hovered bool, active bool, palette theme.Palette, baseBackground lipgloss.Color) string {
 	columns := buildColumns(cfg, width)
-	rowBackground := lipgloss.Color("")
+	rowBackground := baseBackground
 	switch {
 	case selected:
 		rowBackground = palette.Selection
@@ -225,10 +234,8 @@ func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool
 		value := column.Value(entry, cfg.Browser.HumanReadableSize)
 		style := lipgloss.NewStyle().
 			Width(column.Width).
-			Foreground(entryColor(entry, palette))
-		if rowBackground != lipgloss.Color("") {
-			style = style.Background(rowBackground)
-		}
+			Foreground(entryColor(entry, palette)).
+			Background(rowBackground)
 
 		if entry.IsHidden {
 			style = style.Foreground(palette.Muted)
@@ -242,10 +249,7 @@ func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool
 		}
 	}
 
-	rowStyle := lipgloss.NewStyle().Width(width)
-	if rowBackground != lipgloss.Color("") {
-		rowStyle = rowStyle.Background(rowBackground)
-	}
+	rowStyle := lipgloss.NewStyle().Width(width).Background(rowBackground)
 	if selected && active {
 		rowStyle = rowStyle.Bold(true)
 	}

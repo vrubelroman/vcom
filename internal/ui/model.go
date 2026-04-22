@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -100,7 +99,6 @@ type Model struct {
 	infoMode   bool
 	selectMode bool
 
-	helpModel    help.Model
 	previewModel viewport.Model
 	previewData  vfs.Preview
 
@@ -143,17 +141,6 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 		status:     "Ready",
 	}
 
-	model.helpModel = help.New()
-	model.helpModel.ShowAll = false
-	model.helpModel.Styles = help.Styles{
-		ShortKey:       lipgloss.NewStyle().Foreground(palette.FooterKey).Bold(true),
-		ShortDesc:      lipgloss.NewStyle().Foreground(palette.Text),
-		ShortSeparator: lipgloss.NewStyle().Foreground(palette.Border),
-		Ellipsis:       lipgloss.NewStyle().Foreground(palette.Muted),
-		FullKey:        lipgloss.NewStyle().Foreground(palette.FooterKey).Bold(true),
-		FullDesc:       lipgloss.NewStyle().Foreground(palette.Text),
-		FullSeparator:  lipgloss.NewStyle().Foreground(palette.Border),
-	}
 	model.previewModel = viewport.New(0, 0)
 	if err := model.reloadPane(PaneLeft, ""); err != nil {
 		return Model{}, err
@@ -308,7 +295,11 @@ func (m Model) View() string {
 
 	leftWidth, previewWidth, rightWidth := m.layoutWidths()
 	bodyHeight := m.bodyHeight()
-	gap := strings.Repeat(" ", m.cfg.UI.PaneGap)
+	gap := lipgloss.NewStyle().
+		Width(m.cfg.UI.PaneGap).
+		Height(bodyHeight).
+		Background(m.palette.Panel).
+		Render("")
 
 	var panels string
 	if m.selectMode && m.infoMode {
@@ -347,7 +338,12 @@ func (m Model) View() string {
 		parts = append(parts, renderFooter(m))
 	}
 
-	view := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	view := lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Background(m.palette.Background).
+		Foreground(m.palette.Text).
+		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 	if m.modal.kind != modalNone {
 		view = overlayCenter(view, renderModal(m.modal, m.palette, min(64, m.width-8)), m.width)
 	}
@@ -920,6 +916,7 @@ func (m *Model) resizePreview() {
 func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg config.Config, palette theme.Palette, width int, height int) string {
 	innerWidth := max(width-2, 1)
 	innerHeight := max(height-2, 1)
+	contentWidth := max(innerWidth-2, 1)
 
 	box := lipgloss.NewStyle().
 		Width(innerWidth).
@@ -927,10 +924,11 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 		Background(palette.Panel).
 		Foreground(palette.Text).
 		BorderStyle(borderStyle(cfg.UI.Border)).
-		BorderForeground(palette.BorderActive)
+		BorderForeground(palette.BorderActive).
+		BorderBackground(palette.Panel)
 
 	title := lipgloss.NewStyle().
-		Width(innerWidth).
+		Width(contentWidth).
 		Padding(0, 1).
 		Background(palette.Accent).
 		Foreground(palette.Background).
@@ -949,7 +947,12 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 	viewportModel.Height = max(contentHeight-3, 1)
 	parts = append(parts, renderPreviewContent(viewportModel, palette, innerWidth, contentHeight))
 
-	return box.Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	content := lipgloss.NewStyle().
+		Width(innerWidth).
+		MaxHeight(innerHeight).
+		Background(palette.Panel).
+		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	return box.Render(content)
 }
 
 func renderSelectionPane(preview vfs.Preview, viewportModel *viewport.Model, palette theme.Palette, width int, height int) string {
@@ -970,6 +973,8 @@ func renderSelectionPane(preview vfs.Preview, viewportModel *viewport.Model, pal
 }
 
 func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int) string {
+	outerWidth := max(width-2, 1)
+	innerWidth := max(outerWidth-2, 1)
 	leftRows := []string{
 		fmt.Sprintf("kind: %s", fallback(meta.Kind, "n/a")),
 		fmt.Sprintf("size: %s", metaSize(meta)),
@@ -983,29 +988,36 @@ func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int) string 
 		rightRows = append(rightRows, fmt.Sprintf("image: %s %s", meta.ImageFormat, meta.ImageSize))
 	}
 
-	leftWidth := max(width/2, 18)
-	rightWidth := max(width-leftWidth, 18)
+	leftWidth := max(innerWidth/2, 18)
+	if leftWidth > innerWidth {
+		leftWidth = innerWidth
+	}
+	rightWidth := max(innerWidth-leftWidth, 0)
 	left := lipgloss.NewStyle().
 		Width(leftWidth).
+		Background(palette.PanelElevated).
 		Foreground(palette.Muted).
 		Render(strings.Join(leftRows, "\n"))
 	right := lipgloss.NewStyle().
 		Width(rightWidth).
+		Background(palette.PanelElevated).
 		Foreground(palette.Text).
 		Render(strings.Join(rightRows, "\n"))
 
 	pathLine := lipgloss.NewStyle().
-		Width(width).
+		Width(innerWidth).
+		Background(palette.PanelElevated).
 		Foreground(palette.Text).
-		Render(fmt.Sprintf("path: %s", truncateMiddle(meta.Path, max(width-8, 16))))
+		Render(fmt.Sprintf("path: %s", truncateMiddle(meta.Path, max(innerWidth-8, 16))))
 
 	return lipgloss.NewStyle().
-		Width(width).
+		Width(outerWidth).
 		Padding(0, 1).
 		Background(palette.PanelElevated).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderBottom(true).
 		BorderForeground(palette.Border).
+		BorderBackground(palette.PanelElevated).
 		Render(lipgloss.JoinVertical(
 			lipgloss.Left,
 			lipgloss.JoinHorizontal(lipgloss.Top, left, right),
@@ -1073,21 +1085,41 @@ func renderStatus(m Model) string {
 }
 
 func renderFooter(m Model) string {
-	helpModel := m.helpModel
-	helpModel.Width = max(m.width-4, 20)
-	helpView := helpModel.View(m.keys)
-	modeLabel := ""
+	parts := make([]string, 0, 8)
+	for _, binding := range m.keys.ShortHelp() {
+		help := binding.Help()
+		if help.Key == "" || help.Desc == "" {
+			continue
+		}
+		keyView := lipgloss.NewStyle().
+			Background(m.palette.Background).
+			Foreground(m.palette.FooterKey).
+			Bold(true).
+			Render(help.Key)
+		descView := lipgloss.NewStyle().
+			Background(m.palette.Background).
+			Foreground(m.palette.Text).
+			Render(" " + help.Desc)
+		parts = append(parts, keyView+descView)
+	}
+	line := strings.Join(parts, "   ")
 	if m.selectMode {
-		modeLabel = lipgloss.NewStyle().
+		modeLabel := lipgloss.NewStyle().
 			Foreground(m.palette.Accent).
 			Bold(true).
-			Render("  SELECT TEXT MODE")
+			Render("SELECT TEXT MODE")
+		if line != "" {
+			line += "   "
+		}
+		line += modeLabel
 	}
-	return lipgloss.NewStyle().
-		Width(m.width).
-		Padding(0, 1).
-		Background(m.palette.Panel).
-		Render(lipgloss.JoinHorizontal(lipgloss.Top, helpView, modeLabel))
+	line = " " + line
+	return lipgloss.PlaceHorizontal(
+		m.width,
+		lipgloss.Left,
+		line,
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
 }
 
 func renderModal(modal modalState, palette theme.Palette, width int) string {
@@ -1123,10 +1155,12 @@ func overlayCenter(base string, overlay string, width int) string {
 }
 
 func renderPreviewContent(viewportModel *viewport.Model, palette theme.Palette, width int, height int) string {
+	outerWidth := max(width-2, 1)
+	innerWidth := max(outerWidth-2, 1)
 	innerHeight := max(height-1, 1)
 
 	header := lipgloss.NewStyle().
-		Width(width).
+		Width(innerWidth).
 		Padding(0, 1).
 		Background(palette.PanelInactive).
 		Foreground(palette.FooterKey).
@@ -1134,18 +1168,20 @@ func renderPreviewContent(viewportModel *viewport.Model, palette theme.Palette, 
 		Render("CONTENT")
 
 	body := lipgloss.NewStyle().
-		Width(width).
+		Width(innerWidth).
 		Height(max(innerHeight-lipgloss.Height(header), 1)).
 		Padding(0, 1).
 		Background(palette.Panel).
 		Render(viewportModel.View())
 
 	return lipgloss.NewStyle().
-		Width(width).
+		Width(outerWidth).
 		Height(innerHeight).
+		Background(palette.Panel).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderTop(true).
 		BorderForeground(palette.Border).
+		BorderBackground(palette.Panel).
 		Render(lipgloss.JoinVertical(lipgloss.Left, header, body))
 }
 
