@@ -513,6 +513,7 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 		MaxPreviewBytes:       m.cfg.Preview.MaxPreviewBytes,
 		DirectoryPreviewLimit: m.cfg.Preview.DirectoryPreviewLimit,
 		HumanReadableSize:     m.cfg.Browser.HumanReadableSize,
+		ThemeName:             m.cfg.UI.Theme,
 	}
 
 	return func() tea.Msg {
@@ -952,7 +953,10 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 }
 
 func renderSelectionPane(preview vfs.Preview, viewportModel *viewport.Model, palette theme.Palette, width int, height int) string {
-	content := preview.Body
+	content := preview.PlainBody
+	if strings.TrimSpace(content) == "" {
+		content = preview.Body
+	}
 	viewportModel.Width = max(width, 1)
 	viewportModel.Height = max(height, 1)
 	viewportModel.SetContent(content)

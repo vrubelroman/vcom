@@ -11,6 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 )
 
 type PreviewKind string
@@ -38,10 +43,11 @@ type Metadata struct {
 }
 
 type Preview struct {
-	Kind     PreviewKind
-	Title    string
-	Body     string
-	Metadata Metadata
+	Kind      PreviewKind
+	Title     string
+	Body      string
+	PlainBody string
+	Metadata  Metadata
 }
 
 type PreviewOptions struct {
@@ -52,6 +58,7 @@ type PreviewOptions struct {
 	MaxPreviewBytes       int64
 	DirectoryPreviewLimit int
 	HumanReadableSize     bool
+	ThemeName             string
 }
 
 func BuildPreview(entry Entry, options PreviewOptions) Preview {
@@ -77,6 +84,7 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 		preview.Metadata.Size = entry.Size
 		preview.Metadata.SizeKnown = entry.DirSizeKnown
 		preview.Body = buildDirectoryPreview(entry.Path, options)
+		preview.PlainBody = preview.Body
 		return preview
 	}
 
@@ -87,6 +95,7 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 	if err != nil {
 		preview.Kind = PreviewKindError
 		preview.Body = fmt.Sprintf("Could not open file:\n\n%s", err)
+		preview.PlainBody = preview.Body
 		return preview
 	}
 	defer file.Close()
@@ -95,6 +104,7 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 	if _, err := io.CopyN(buffer, file, options.MaxPreviewBytes); err != nil && err != io.EOF {
 		preview.Kind = PreviewKindError
 		preview.Body = fmt.Sprintf("Could not read preview:\n\n%s", err)
+		preview.PlainBody = preview.Body
 		return preview
 	}
 
@@ -109,18 +119,62 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 			dimensions,
 			entry.Path,
 		)
+		preview.PlainBody = preview.Body
 		return preview
 	}
 
 	if IsBinarySample(data) {
 		preview.Kind = PreviewKindBinary
 		preview.Body = "Binary file detected.\n\nSafe inline preview is disabled for this file type."
+		preview.PlainBody = preview.Body
 		return preview
 	}
 
 	preview.Kind = PreviewKindText
-	preview.Body = strings.ReplaceAll(string(data), "\t", "    ")
+	preview.PlainBody = strings.ReplaceAll(string(data), "\t", "    ")
+	preview.Body = highlightText(entry.Path, preview.PlainBody, options.ThemeName)
 	return preview
+}
+
+func highlightText(path string, source string, themeName string) string {
+	lexer := lexers.Match(path)
+	if lexer == nil {
+		lexer = lexers.Analyse(source)
+	}
+	if lexer == nil {
+		return source
+	}
+
+	iterator, err := chroma.Coalesce(lexer).Tokenise(nil, source)
+	if err != nil {
+		return source
+	}
+
+	style := styles.Get(chromaStyleName(themeName))
+	if style == nil {
+		return source
+	}
+
+	var output bytes.Buffer
+	if err := formatters.TTY16m.Format(&output, style, iterator); err != nil {
+		return source
+	}
+	return output.String()
+}
+
+func chromaStyleName(themeName string) string {
+	switch strings.ToLower(strings.TrimSpace(themeName)) {
+	case "catppuccin-mocha":
+		return "catppuccin-mocha"
+	case "tokyo-night":
+		return "tokyonight-night"
+	case "gruvbox-dark":
+		return "gruvbox"
+	case "nord-frost":
+		return "nord"
+	default:
+		return "catppuccin-mocha"
+	}
 }
 
 func buildDirectoryPreview(path string, options PreviewOptions) string {
