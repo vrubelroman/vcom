@@ -63,6 +63,12 @@ The key difference from classic `mc` is the inspect mode on `i`. It temporarily 
 go run ./cmd/vcom
 ```
 
+To build a local binary:
+
+```bash
+go build -o vcom ./cmd/vcom
+```
+
 Optional config file lookup order:
 
 1. `-config /path/to/vcom.toml`
@@ -88,3 +94,53 @@ The sample config in [vcom.toml](/home/vrubel/projects/vcom/vcom.toml) is intent
 - Real inline image rendering is intentionally not enabled yet because terminal support is fragmented. The current architecture keeps that as an isolated preview backend to add later.
 
 More detail is in [docs/architecture.md](/home/vrubel/projects/vcom/docs/architecture.md).
+
+## Installation
+
+### NixOS / Nix
+
+Run directly from the flake:
+
+```bash
+nix run github:vrubelroman/vcom?ref=<tag>
+```
+
+Install into the current profile:
+
+```bash
+nix profile add github:vrubelroman/vcom?ref=<tag>
+```
+
+`nix profile add` installs `vcom` into the current user's Nix profile. It does not edit `configuration.nix`, does not rebuild NixOS, and does not make the package a declarative system package.
+
+### Debian / Ubuntu
+
+Release builds include a `.deb` artifact. Install it with:
+
+```bash
+sudo apt install ./vcom_<version>_amd64.deb
+```
+
+### Arch Linux
+
+A `PKGBUILD` is included in the repository. Build it with:
+
+```bash
+makepkg -si
+```
+
+## Releases
+
+Tagging a version like `v0.1.0` triggers the GitHub Actions release workflow:
+
+- runs `go test ./...`
+- vendors Go modules for reproducible packaging
+- builds the release binary
+- builds the `.deb` package with `dpkg-deb`
+- publishes release artifacts to GitHub Releases
+
+Release artifacts include:
+
+- `vcom-<tag>-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_<version>_amd64.deb`
+- `vcom-<tag>-checksums.txt`
