@@ -114,10 +114,11 @@ func renderPane(
 	}
 
 	innerWidth := max(width-2, 1)
+	innerHeight := max(height-2, 1)
 
 	box := lipgloss.NewStyle().
-		Width(width).
-		Height(height).
+		Width(innerWidth).
+		Height(innerHeight).
 		Background(palette.PanelInactive).
 		Foreground(palette.Text).
 		BorderStyle(borderStyle(cfg.UI.Border)).
@@ -126,7 +127,7 @@ func renderPane(
 	header := lipgloss.NewStyle().
 		Render(renderPaneHeader(pane, cfg, palette, innerWidth, active, headerBg))
 
-	rowsHeight := max(height-4, 1)
+	rowsHeight := max(innerHeight-2, 1)
 	headerRow := renderColumnsHeader(cfg, innerWidth, palette)
 	rows := renderPaneRows(pane, cfg, palette, innerWidth, rowsHeight, active, hoverIndex)
 	content := lipgloss.JoinVertical(lipgloss.Left, header, headerRow, rows)
@@ -293,8 +294,8 @@ func buildColumns(cfg config.Config, totalWidth int) []columnSpec {
 		fixed = append(fixed, columnSpec{
 			Key:        "size",
 			Title:      "Size",
-			Width:      10,
-			MinWidth:   7,
+			Width:      9,
+			MinWidth:   6,
 			AlignRight: true,
 			Value: func(entry vfs.Entry, human bool) string {
 				if entry.IsDir {
@@ -394,7 +395,7 @@ func columnSeparator(columnKey string, palette theme.Palette, background lipglos
 
 func separatorWidth(columnKey string) int {
 	if columnKey == "size" {
-		return 3
+		return 2
 	}
 	return 1
 }
@@ -433,7 +434,7 @@ func truncateMiddle(value string, maxWidth int) string {
 		return value
 	}
 	if maxWidth <= 3 {
-		return value[:maxWidth]
+		return trimToWidthRight(value, maxWidth)
 	}
 	left := maxWidth/2 - 1
 	right := maxWidth - left - 1
@@ -443,7 +444,7 @@ func truncateMiddle(value string, maxWidth int) string {
 	if right < 1 {
 		right = 1
 	}
-	return value[:left] + "…" + value[len(value)-right:]
+	return trimToWidthRight(value, left) + "…" + trimToWidthLeft(value, right)
 }
 
 func truncateRight(value string, maxWidth int) string {
@@ -451,9 +452,9 @@ func truncateRight(value string, maxWidth int) string {
 		return value
 	}
 	if maxWidth == 1 {
-		return value[:1]
+		return trimToWidthRight(value, 1)
 	}
-	return value[:maxWidth-1] + "…"
+	return trimToWidthRight(value, maxWidth-1) + "…"
 }
 
 func truncateForColumn(value string, maxWidth int, alignRight bool) string {
@@ -462,14 +463,46 @@ func truncateForColumn(value string, maxWidth int, alignRight bool) string {
 	}
 	if alignRight {
 		if maxWidth <= 1 {
-			return value[len(value)-1:]
+			return trimToWidthLeft(value, 1)
 		}
-		if len(value) <= maxWidth {
-			return value
-		}
-		return "…" + value[len(value)-maxWidth+1:]
+		return "…" + trimToWidthLeft(value, maxWidth-1)
 	}
 	return truncateRight(value, maxWidth)
+}
+
+func trimToWidthRight(value string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	width := 0
+	var builder strings.Builder
+	for _, r := range value {
+		rw := lipgloss.Width(string(r))
+		if width+rw > maxWidth {
+			break
+		}
+		builder.WriteRune(r)
+		width += rw
+	}
+	return builder.String()
+}
+
+func trimToWidthLeft(value string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	width := 0
+	start := len(runes)
+	for i := len(runes) - 1; i >= 0; i-- {
+		rw := lipgloss.Width(string(runes[i]))
+		if width+rw > maxWidth {
+			break
+		}
+		width += rw
+		start = i
+	}
+	return string(runes[start:])
 }
 
 func entryIcon(entry vfs.Entry) string {

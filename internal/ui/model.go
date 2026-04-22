@@ -94,10 +94,11 @@ type Model struct {
 	width  int
 	height int
 
-	left     BrowserPane
-	right    BrowserPane
-	active   PaneID
-	infoMode bool
+	left       BrowserPane
+	right      BrowserPane
+	active     PaneID
+	infoMode   bool
+	selectMode bool
 
 	helpModel    help.Model
 	previewModel viewport.Model
@@ -180,6 +181,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if selected, ok := m.activePane().Selected(); ok && selected.Path == msg.entryPath {
 			m.applyPreview(msg.preview)
 		}
+		if m.selectMode && msg.preview.Kind != vfs.PreviewKindText {
+			m.selectMode = false
+			return m, enableMouseCmd()
+		}
 		return m, nil
 
 	case dirSizeMsg:
@@ -236,6 +241,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleEdit()
 		case key.Matches(msg, m.keys.Info):
 			return m.toggleInfo()
+		case key.Matches(msg, m.keys.SelectText):
+			return m.toggleSelectMode()
 		case key.Matches(msg, m.keys.ToggleHidden):
 			return m.toggleHidden()
 		case key.Matches(msg, m.keys.CycleTheme):
@@ -329,12 +336,11 @@ func (m Model) View() string {
 		)
 	}
 
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 3)
 	if m.cfg.UI.ShowTitleBar {
 		parts = append(parts, renderTitleBar(m))
 	}
 	parts = append(parts, panels)
-	parts = append(parts, renderStatus(m))
 	if m.cfg.UI.ShowFooter {
 		parts = append(parts, renderFooter(m))
 	}
@@ -740,8 +746,27 @@ func (m *Model) toggleInfo() (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("Info mode: %s selection", strings.ToUpper(string(m.active)))
 		return m, m.loadPreviewCmd()
 	}
+	if m.selectMode {
+		m.selectMode = false
+		return m, enableMouseCmd()
+	}
 	m.status = "Info mode: off"
 	return m, nil
+}
+
+func (m *Model) toggleSelectMode() (tea.Model, tea.Cmd) {
+	if m.selectMode {
+		m.selectMode = false
+		m.status = "Text selection mode: off"
+		return m, enableMouseCmd()
+	}
+	if !m.infoMode || m.previewData.Kind != vfs.PreviewKindText {
+		m.status = "Text selection mode works only for text preview in info pane"
+		return m, nil
+	}
+	m.selectMode = true
+	m.status = "Text selection mode: on"
+	return m, disableMouseCmd()
 }
 
 func (m *Model) toggleHidden() (tea.Model, tea.Cmd) {
@@ -867,7 +892,7 @@ func (m *Model) layoutWidths() (int, int, int) {
 }
 
 func (m *Model) bodyHeight() int {
-	height := m.height - 1
+	height := m.height
 	if m.cfg.UI.ShowTitleBar {
 		height--
 	}
@@ -888,16 +913,19 @@ func (m *Model) resizePreview() {
 }
 
 func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg config.Config, palette theme.Palette, width int, height int) string {
+	innerWidth := max(width-2, 1)
+	innerHeight := max(height-2, 1)
+
 	box := lipgloss.NewStyle().
-		Width(width).
-		Height(height).
+		Width(innerWidth).
+		Height(innerHeight).
 		Background(palette.Panel).
 		Foreground(palette.Text).
 		BorderStyle(borderStyle(cfg.UI.Border)).
 		BorderForeground(palette.BorderActive)
 
 	title := lipgloss.NewStyle().
-		Width(width-2).
+		Width(innerWidth).
 		Padding(0, 1).
 		Background(palette.Accent).
 		Foreground(palette.Background).
@@ -906,9 +934,9 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 
 	parts := []string{title}
 	if cfg.Preview.ShowMetadata {
-		parts = append(parts, renderMetadata(preview.Metadata, palette, width-2))
+		parts = append(parts, renderMetadata(preview.Metadata, palette, innerWidth))
 	}
-	parts = append(parts, renderPreviewContent(viewportModel, palette, width-2))
+	parts = append(parts, renderPreviewContent(viewportModel, palette, innerWidth))
 
 	return box.Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
@@ -1020,6 +1048,13 @@ func renderFooter(m Model) string {
 	helpModel := m.helpModel
 	helpModel.Width = max(m.width-28, 20)
 	helpView := helpModel.View(m.keys)
+	modeLabel := ""
+	if m.selectMode {
+		modeLabel = lipgloss.NewStyle().
+			Foreground(m.palette.Accent).
+			Bold(true).
+			Render("  SELECT TEXT MODE")
+	}
 	legend := lipgloss.NewStyle().
 		Foreground(m.palette.Muted).
 		Render(" dir  󰈙 text   config  󰆍 exec  󰋩 image  󰈔 bin")
@@ -1027,7 +1062,7 @@ func renderFooter(m Model) string {
 		Width(m.width).
 		Padding(0, 1).
 		Background(m.palette.Panel).
-		Render(lipgloss.JoinHorizontal(lipgloss.Top, helpView, "   ", legend))
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, helpView, modeLabel, "   ", legend))
 }
 
 func renderModal(modal modalState, palette theme.Palette, width int) string {
@@ -1252,6 +1287,12 @@ func enableMouseCmd() tea.Cmd {
 	}
 }
 
+func disableMouseCmd() tea.Cmd {
+	return func() tea.Msg {
+		return tea.DisableMouse()
+	}
+}
+
 func resolveStartPath(raw string, fallback string) (string, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -1319,20 +1360,28 @@ func (m *Model) mouseTarget(x, y int) (PaneID, int, bool) {
 		if m.infoMode && m.active == PaneRight {
 			return "", 0, false
 		}
-		return PaneLeft, paneIndexFromMouse(y-top, bodyHeight, &m.left), true
+		index, ok := paneIndexFromMouse(y-top, bodyHeight, &m.left)
+		if !ok {
+			return "", 0, false
+		}
+		return PaneLeft, index, true
 	case x >= rightStart && x < rightStart+rightWidth:
 		if m.infoMode && m.active == PaneLeft {
 			return "", 0, false
 		}
-		return PaneRight, paneIndexFromMouse(y-top, bodyHeight, &m.right), true
+		index, ok := paneIndexFromMouse(y-top, bodyHeight, &m.right)
+		if !ok {
+			return "", 0, false
+		}
+		return PaneRight, index, true
 	default:
 		return "", 0, false
 	}
 }
 
-func paneIndexFromMouse(localY int, height int, pane *BrowserPane) int {
+func paneIndexFromMouse(localY int, height int, pane *BrowserPane) (int, bool) {
 	if localY < 1 || localY >= height-1 {
-		return pane.Cursor
+		return 0, false
 	}
 	row := localY - 1
 	index := pane.Offset + row
@@ -1340,12 +1389,9 @@ func paneIndexFromMouse(localY int, height int, pane *BrowserPane) int {
 		index = 0
 	}
 	if index >= len(pane.Entries) {
-		index = len(pane.Entries) - 1
+		return 0, false
 	}
-	if index < 0 {
-		return 0
-	}
-	return index
+	return index, true
 }
 
 func isEditableEntry(entry vfs.Entry) bool {
