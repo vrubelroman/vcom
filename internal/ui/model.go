@@ -311,7 +311,9 @@ func (m Model) View() string {
 	gap := strings.Repeat(" ", m.cfg.UI.PaneGap)
 
 	var panels string
-	if m.infoMode {
+	if m.selectMode && m.infoMode {
+		panels = renderSelectionPane(m.previewData, &m.previewModel, m.palette, m.width, bodyHeight)
+	} else if m.infoMode {
 		if m.active == PaneLeft {
 			panels = lipgloss.JoinHorizontal(
 				lipgloss.Top,
@@ -947,6 +949,20 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 	parts = append(parts, renderPreviewContent(viewportModel, palette, innerWidth, contentHeight))
 
 	return box.Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+}
+
+func renderSelectionPane(preview vfs.Preview, viewportModel *viewport.Model, palette theme.Palette, width int, height int) string {
+	content := preview.Body
+	viewportModel.Width = max(width, 1)
+	viewportModel.Height = max(height, 1)
+	viewportModel.SetContent(content)
+
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		Background(palette.Panel).
+		Foreground(palette.Text).
+		Render(viewportModel.View())
 }
 
 func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int) string {
