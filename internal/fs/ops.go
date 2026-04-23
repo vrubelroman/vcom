@@ -4,12 +4,79 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
+type TransferStats struct {
+	FilesTotal int
+	BytesTotal int64
+}
+
+type CopyProgress struct {
+	FilesDone   int
+	FilesTotal  int
+	BytesDone   int64
+	BytesTotal  int64
+	CurrentPath string
+}
+
+type copyProgressState struct {
+	filesDone int
+	bytesDone int64
+	stats     TransferStats
+	callback  func(CopyProgress)
+	lastEmit  time.Time
+}
+
 func CopyPath(srcPath string, dstDir string, overwrite bool) (string, error) {
+	return CopyPathWithProgress(srcPath, dstDir, overwrite, TransferStats{}, nil)
+}
+
+func CopyStats(srcPath string) (TransferStats, error) {
+	srcInfo, err := os.Lstat(srcPath)
+	if err != nil {
+		return TransferStats{}, fmt.Errorf("stat %s: %w", srcPath, err)
+	}
+
+	if srcInfo.Mode()&os.ModeSymlink != 0 {
+		return TransferStats{FilesTotal: 1, BytesTotal: 0}, nil
+	}
+	if !srcInfo.IsDir() {
+		return TransferStats{FilesTotal: 1, BytesTotal: srcInfo.Size()}, nil
+	}
+
+	stats := TransferStats{}
+	err = filepath.WalkDir(srcPath, func(current string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+
+		stats.FilesTotal++
+		if info.Mode()&os.ModeSymlink == 0 {
+			stats.BytesTotal += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return TransferStats{}, err
+	}
+
+	return stats, nil
+}
+
+func CopyPathWithProgress(srcPath string, dstDir string, overwrite bool, stats TransferStats, progress func(CopyProgress)) (string, error) {
 	srcInfo, err := os.Lstat(srcPath)
 	if err != nil {
 		return "", fmt.Errorf("stat %s: %w", srcPath, err)
@@ -33,19 +100,44 @@ func CopyPath(srcPath string, dstDir string, overwrite bool) (string, error) {
 		}
 	}
 
+	if progress == nil {
+		progress = func(CopyProgress) {}
+	}
+	if stats.FilesTotal == 0 && stats.BytesTotal == 0 {
+		resolved, err := CopyStats(srcPath)
+		if err != nil {
+			return "", err
+		}
+		stats = resolved
+	}
+	tracker := copyProgressState{stats: stats, callback: progress}
+	tracker.emit(srcPath, true)
+
 	if srcInfo.Mode()&os.ModeSymlink != 0 {
 		target, err := os.Readlink(srcPath)
 		if err != nil {
 			return "", err
 		}
-		return targetPath, os.Symlink(target, targetPath)
+		if err := os.Symlink(target, targetPath); err != nil {
+			return "", err
+		}
+		tracker.finishFile(srcPath)
+		return targetPath, nil
 	}
 
 	if srcInfo.IsDir() {
-		return targetPath, copyDir(srcPath, targetPath)
+		if err := copyDir(srcPath, targetPath, &tracker); err != nil {
+			return "", err
+		}
+		tracker.emit(srcPath, true)
+		return targetPath, nil
 	}
 
-	return targetPath, copyFile(srcPath, targetPath, srcInfo.Mode())
+	if err := copyFile(srcPath, targetPath, srcInfo.Mode(), &tracker); err != nil {
+		return "", err
+	}
+	tracker.emit(srcPath, true)
+	return targetPath, nil
 }
 
 func MovePath(srcPath string, dstDir string, overwrite bool) (string, error) {
@@ -105,7 +197,7 @@ func MakeDir(parent string, name string) (string, error) {
 	return target, nil
 }
 
-func copyDir(srcDir string, dstDir string) error {
+func copyDir(srcDir string, dstDir string, tracker *copyProgressState) error {
 	info, err := os.Lstat(srcDir)
 	if err != nil {
 		return err
@@ -137,12 +229,15 @@ func copyDir(srcDir string, dstDir string) error {
 			if err := os.Symlink(target, dstPath); err != nil {
 				return err
 			}
+			if tracker != nil {
+				tracker.finishFile(srcPath)
+			}
 		case info.IsDir():
-			if err := copyDir(srcPath, dstPath); err != nil {
+			if err := copyDir(srcPath, dstPath, tracker); err != nil {
 				return err
 			}
 		default:
-			if err := copyFile(srcPath, dstPath, info.Mode()); err != nil {
+			if err := copyFile(srcPath, dstPath, info.Mode(), tracker); err != nil {
 				return err
 			}
 		}
@@ -151,7 +246,7 @@ func copyDir(srcDir string, dstDir string) error {
 	return nil
 }
 
-func copyFile(srcPath string, dstPath string, mode os.FileMode) error {
+func copyFile(srcPath string, dstPath string, mode os.FileMode, tracker *copyProgressState) error {
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
 		return err
@@ -164,10 +259,58 @@ func copyFile(srcPath string, dstPath string, mode os.FileMode) error {
 	}
 	defer dstFile.Close()
 
-	if _, err := io.Copy(dstFile, srcFile); err != nil {
+	writer := io.Writer(dstFile)
+	if tracker != nil {
+		writer = &progressWriter{base: dstFile, tracker: tracker, path: srcPath}
+	}
+	if _, err := io.Copy(writer, srcFile); err != nil {
 		return err
 	}
+	if tracker != nil {
+		tracker.finishFile(srcPath)
+	}
 	return nil
+}
+
+type progressWriter struct {
+	base    io.Writer
+	tracker *copyProgressState
+	path    string
+}
+
+func (w *progressWriter) Write(data []byte) (int, error) {
+	n, err := w.base.Write(data)
+	if n > 0 {
+		w.tracker.addBytes(int64(n), w.path)
+	}
+	return n, err
+}
+
+func (s *copyProgressState) addBytes(delta int64, currentPath string) {
+	s.bytesDone += delta
+	s.emit(currentPath, false)
+}
+
+func (s *copyProgressState) finishFile(currentPath string) {
+	s.filesDone++
+	s.emit(currentPath, true)
+}
+
+func (s *copyProgressState) emit(currentPath string, force bool) {
+	if s.callback == nil {
+		return
+	}
+	if !force && time.Since(s.lastEmit) < 75*time.Millisecond {
+		return
+	}
+	s.lastEmit = time.Now()
+	s.callback(CopyProgress{
+		FilesDone:   s.filesDone,
+		FilesTotal:  s.stats.FilesTotal,
+		BytesDone:   s.bytesDone,
+		BytesTotal:  s.stats.BytesTotal,
+		CurrentPath: currentPath,
+	})
 }
 
 func samePath(left string, right string) (bool, error) {

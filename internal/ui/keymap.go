@@ -24,6 +24,7 @@ type KeyMap struct {
 	Mkdir        key.Binding
 	Delete       key.Binding
 	Confirm      key.Binding
+	Background   key.Binding
 	Cancel       key.Binding
 	Quit         key.Binding
 }
@@ -51,6 +52,7 @@ func DefaultKeyMap() KeyMap {
 		Mkdir:        key.NewBinding(key.WithKeys("f7", "n"), key.WithHelp("F7/n", "mkdir")),
 		Delete:       key.NewBinding(key.WithKeys("f8", "delete", "x"), key.WithHelp("F8/x", "delete")),
 		Confirm:      key.NewBinding(key.WithKeys("enter", "y"), key.WithHelp("Enter/y", "confirm")),
+		Background:   key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "background")),
 		Cancel:       key.NewBinding(key.WithKeys("esc", "n"), key.WithHelp("Esc/n", "cancel")),
 		Quit:         key.NewBinding(key.WithKeys("f10", "q", "ctrl+c"), key.WithHelp("F10/q", "quit")),
 	}

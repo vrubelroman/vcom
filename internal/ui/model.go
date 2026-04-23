@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"vcom/internal/config"
 	vfs "vcom/internal/fs"
@@ -25,6 +26,8 @@ const (
 	modalNone modalKind = iota
 	modalMkdir
 	modalConfirm
+	modalCopyProgress
+	modalNotice
 )
 
 type fileOpKind int
@@ -43,6 +46,7 @@ type pendingOperation struct {
 	sourcePath string
 	targetDir  string
 	overwrite  bool
+	stats      vfs.TransferStats
 }
 
 type modalState struct {
@@ -70,6 +74,39 @@ type opMsg struct {
 	sourcePath string
 	targetPath string
 	err        error
+}
+
+type copyPlanMsg struct {
+	sourcePath string
+	targetDir  string
+	targetPath string
+	overwrite  bool
+	stats      vfs.TransferStats
+	err        error
+}
+
+type copyProgressMsg struct {
+	jobID    int
+	progress vfs.CopyProgress
+}
+
+type copyDoneMsg struct {
+	jobID      int
+	sourcePath string
+	targetPath string
+	err        error
+}
+
+type dismissNoticeMsg struct{}
+
+type copyJobState struct {
+	id         int
+	sourcePath string
+	targetDir  string
+	targetPath string
+	progress   vfs.CopyProgress
+	overwrite  bool
+	background bool
 }
 
 type mouseClickState struct {
@@ -108,6 +145,10 @@ type Model struct {
 
 	lastClick mouseClickState
 	hover     hoverState
+
+	copyJob      *copyJobState
+	nextCopyJob  int
+	copyProgress chan tea.Msg
 }
 
 func NewModel(cfg config.Config, configPath string) (Model, error) {
@@ -131,14 +172,15 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 	}
 
 	model := Model{
-		cfg:        cfg,
-		configPath: configPath,
-		palette:    palette,
-		keys:       DefaultKeyMap(),
-		left:       BrowserPane{ID: PaneLeft, Path: leftPath},
-		right:      BrowserPane{ID: PaneRight, Path: rightPath},
-		active:     PaneLeft,
-		status:     "Ready",
+		cfg:          cfg,
+		configPath:   configPath,
+		palette:      palette,
+		keys:         DefaultKeyMap(),
+		left:         BrowserPane{ID: PaneLeft, Path: leftPath},
+		right:        BrowserPane{ID: PaneRight, Path: rightPath},
+		active:       PaneLeft,
+		status:       "Ready",
+		copyProgress: make(chan tea.Msg, 256),
 	}
 
 	model.previewModel = viewport.New(0, 0)
@@ -213,6 +255,86 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_ = m.reloadPane(PaneLeft, activeSelection)
 		_ = m.reloadPane(PaneRight, activeSelection)
 		return m, m.loadPreviewCmd()
+
+	case copyPlanMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+
+		title := "Copy selected entry?"
+		body := strings.Join([]string{
+			fmt.Sprintf("From: %s", msg.sourcePath),
+			fmt.Sprintf("To:   %s", msg.targetPath),
+			"",
+			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
+			fmt.Sprintf("Data:  %s", formatSize(msg.stats.BytesTotal, true)),
+		}, "\n")
+		if msg.overwrite {
+			body += "\n\nTarget exists and will be overwritten."
+		}
+		note := "Enter/y to start copy, Esc/n to cancel"
+		m.openConfirmModal(title, body, note, pendingOperation{
+			kind:       opCopy,
+			sourcePath: msg.sourcePath,
+			targetDir:  msg.targetDir,
+			overwrite:  msg.overwrite,
+			stats:      msg.stats,
+		})
+		return m, nil
+
+	case copyProgressMsg:
+		if m.copyJob == nil || msg.jobID != m.copyJob.id {
+			return m, nil
+		}
+		m.copyJob.progress = msg.progress
+		if m.copyJob.background {
+			m.status = formatCopyStatus(msg.progress)
+		}
+		return m, waitCopyProgressCmd(m.copyProgress)
+
+	case copyDoneMsg:
+		if m.copyJob == nil || msg.jobID != m.copyJob.id {
+			return m, nil
+		}
+
+		m.busy = false
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Copy failed: %v", msg.err)
+			m.copyJob = nil
+			if m.modal.kind == modalCopyProgress {
+				m.modal = modalState{}
+			}
+			return m, nil
+		}
+
+		m.status = fmt.Sprintf("Copied to %s", msg.targetPath)
+		activeSelection := selectedName(m.activePane())
+		_ = m.reloadPane(PaneLeft, activeSelection)
+		_ = m.reloadPane(PaneRight, activeSelection)
+		background := m.copyJob.background
+		m.copyJob = nil
+
+		cmd := m.loadPreviewCmd()
+		if m.modal.kind == modalCopyProgress {
+			m.modal = modalState{}
+		}
+		if background {
+			m.modal = modalState{
+				kind:  modalNotice,
+				title: "Copy complete",
+				body:  filepath.Base(msg.sourcePath) + " copied successfully.",
+			}
+			cmd = tea.Batch(cmd, dismissNoticeCmd(time.Second))
+		}
+		return m, cmd
+
+	case dismissNoticeMsg:
+		if m.modal.kind == modalNotice {
+			m.modal = modalState{}
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		if m.modal.kind != modalNone {
@@ -345,7 +467,7 @@ func (m Model) View() string {
 		Foreground(m.palette.Text).
 		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 	if m.modal.kind != modalNone {
-		view = overlayCenter(view, renderModal(m.modal, m.palette, min(64, m.width-8)), m.width)
+		view = overlayCenter(view, renderModal(m, m.palette, min(72, m.width-8)), m.width)
 	}
 	return view
 }
@@ -384,11 +506,38 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "Nothing to confirm"
 				return m, nil
 			}
-			m.busy = true
-			cmd := m.modal.pending.cmd()
+			pending := *m.modal.pending
 			m.modal = modalState{}
-			return m, cmd
+			if pending.kind == opCopy {
+				if m.copyJob != nil {
+					m.status = "Copy is already running"
+					return m, nil
+				}
+				m.busy = true
+				return m, m.startCopyJob(pending.sourcePath, pending.targetDir, pending.overwrite, pending.stats)
+			}
+			m.busy = true
+			return m, pending.cmd()
 		}
+
+	case modalCopyProgress:
+		if key.Matches(msg, m.keys.Background) {
+			if m.copyJob == nil {
+				m.modal = modalState{}
+				return m, nil
+			}
+			m.copyJob.background = true
+			m.modal = modalState{}
+			m.status = "Copy continues in background"
+			return m, nil
+		}
+		return m, nil
+
+	case modalNotice:
+		if key.Matches(msg, m.keys.Confirm) || key.Matches(msg, m.keys.Cancel) {
+			m.modal = modalState{}
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -553,6 +702,21 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 	if err != nil {
 		m.status = err.Error()
 		return m, nil
+	}
+
+	if kind == opCopy {
+		if m.copyJob != nil {
+			m.status = "Copy is already running"
+			return m, nil
+		}
+
+		overwrite := exists
+		if exists && !m.cfg.Behavior.ConfirmOverwrite {
+			overwrite = true
+		}
+		m.busy = true
+		m.status = fmt.Sprintf("Calculating copy size for %s", selected.DisplayName())
+		return m, copyPlanCmd(selected.Path, targetDir, overwrite)
 	}
 
 	if exists && m.cfg.Behavior.ConfirmOverwrite {
@@ -1122,7 +1286,18 @@ func renderFooter(m Model) string {
 	)
 }
 
-func renderModal(modal modalState, palette theme.Palette, width int) string {
+func renderModal(m Model, palette theme.Palette, width int) string {
+	if m.modal.kind == modalCopyProgress && m.copyJob != nil {
+		return renderCopyProgressModal(*m.copyJob, palette, width)
+	}
+
+	modal := m.modal
+	contentWidth := max(width-4, 1)
+	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
+	bodyStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
+	noteStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
+	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
+
 	box := lipgloss.NewStyle().
 		Width(width).
 		Padding(1, 2).
@@ -1131,27 +1306,113 @@ func renderModal(modal modalState, palette theme.Palette, width int) string {
 		BorderStyle(lipgloss.DoubleBorder()).
 		BorderForeground(palette.BorderActive)
 
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(palette.Accent).Render(modal.title),
-		lipgloss.NewStyle().Foreground(palette.Muted).Render(modal.body),
-	}
+	lines := []string{titleStyle.Render(modal.title), spacer, bodyStyle.Render(modal.body)}
 
 	if modal.kind == modalMkdir {
-		lines = append(lines, modal.input.View())
+		lines = append(lines, spacer, lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(modal.input.View()))
 	}
 	if modal.note != "" {
-		lines = append(lines, lipgloss.NewStyle().Foreground(palette.Muted).Render(modal.note))
+		lines = append(lines, spacer, noteStyle.Render(modal.note))
 	}
 
-	return box.Render(strings.Join(lines, "\n\n"))
+	return box.Render(strings.Join(lines, "\n"))
+}
+
+func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int) string {
+	contentWidth := max(width-4, 1)
+	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
+	lineStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Text)
+	mutedStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
+	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
+
+	box := lipgloss.NewStyle().
+		Width(width).
+		Padding(1, 2).
+		Background(palette.Panel).
+		Foreground(palette.Text).
+		BorderStyle(lipgloss.DoubleBorder()).
+		BorderForeground(palette.BorderActive)
+
+	progress := job.progress
+	ratio := 0.0
+	if progress.BytesTotal > 0 {
+		ratio = float64(progress.BytesDone) / float64(progress.BytesTotal)
+	}
+
+	lines := []string{
+		titleStyle.Render("Copying"),
+		lineStyle.Render(fmt.Sprintf("From: %s", job.sourcePath)),
+		lineStyle.Render(fmt.Sprintf("To:   %s", job.targetPath)),
+		spacer,
+		lineStyle.Render(renderProgressBar(ratio, max(width-8, 10), palette)),
+		lineStyle.Render(fmt.Sprintf("Files: %d / %d", progress.FilesDone, progress.FilesTotal)),
+		lineStyle.Render(fmt.Sprintf("Data:  %s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true))),
+	}
+
+	if strings.TrimSpace(progress.CurrentPath) != "" {
+		lines = append(lines, lineStyle.Render("Current: "+truncateMiddle(progress.CurrentPath, max(width-18, 16))))
+	}
+	lines = append(lines, spacer)
+	lines = append(lines, mutedStyle.Render("Press b to continue in background"))
+
+	return box.Render(strings.Join(lines, "\n"))
+}
+
+func renderProgressBar(ratio float64, width int, palette theme.Palette) string {
+	if width < 10 {
+		width = 10
+	}
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	filled := int(float64(width) * ratio)
+	if filled > width {
+		filled = width
+	}
+	if filled < 0 {
+		filled = 0
+	}
+
+	bar := lipgloss.NewStyle().Foreground(palette.Accent).Render(strings.Repeat("█", filled))
+	rest := lipgloss.NewStyle().Foreground(palette.Border).Render(strings.Repeat("░", width-filled))
+	percent := fmt.Sprintf(" %3.0f%%", ratio*100)
+	return bar + rest + percent
 }
 
 func overlayCenter(base string, overlay string, width int) string {
 	if width <= 0 {
-		return base + "\n" + overlay
+		return base
 	}
-	centered := lipgloss.Place(width, lipgloss.Height(overlay), lipgloss.Center, lipgloss.Top, overlay)
-	return base + "\n" + centered
+
+	baseLines := strings.Split(base, "\n")
+	overlayLines := strings.Split(overlay, "\n")
+	if len(baseLines) == 0 || len(overlayLines) == 0 {
+		return base
+	}
+
+	overlayWidth := 0
+	for _, line := range overlayLines {
+		overlayWidth = max(overlayWidth, ansi.StringWidth(line))
+	}
+	startY := max((len(baseLines)-len(overlayLines))/2, 0)
+	startX := max((width-overlayWidth)/2, 0)
+	endX := startX + overlayWidth
+
+	for idx, line := range overlayLines {
+		targetY := startY + idx
+		if targetY >= len(baseLines) {
+			break
+		}
+		baseLine := baseLines[targetY]
+		left := ansi.Cut(baseLine, 0, startX)
+		right := ansi.Cut(baseLine, endX, width)
+		baseLines[targetY] = left + line + right
+	}
+
+	return strings.Join(baseLines, "\n")
 }
 
 func renderPreviewContent(viewportModel *viewport.Model, palette theme.Palette, width int, height int) string {
@@ -1204,8 +1465,6 @@ func previewIcon(preview vfs.Preview) string {
 
 func (p pendingOperation) cmd() tea.Cmd {
 	switch p.kind {
-	case opCopy:
-		return copyCmd(p.sourcePath, p.targetDir, p.overwrite)
 	case opMove:
 		return moveCmd(p.sourcePath, p.targetDir, p.overwrite)
 	case opDelete:
@@ -1217,8 +1476,6 @@ func (p pendingOperation) cmd() tea.Cmd {
 
 func operationCmd(kind fileOpKind, sourcePath, targetDir string, overwrite bool) tea.Cmd {
 	switch kind {
-	case opCopy:
-		return copyCmd(sourcePath, targetDir, overwrite)
 	case opMove:
 		return moveCmd(sourcePath, targetDir, overwrite)
 	default:
@@ -1233,11 +1490,70 @@ func dirSizeCmd(path string) tea.Cmd {
 	}
 }
 
-func copyCmd(sourcePath, targetDir string, overwrite bool) tea.Cmd {
+func copyPlanCmd(sourcePath, targetDir string, overwrite bool) tea.Cmd {
 	return func() tea.Msg {
-		targetPath, err := vfs.CopyPath(sourcePath, targetDir, overwrite)
-		return opMsg{kind: opCopy, sourcePath: sourcePath, targetPath: targetPath, err: err}
+		stats, err := vfs.CopyStats(sourcePath)
+		return copyPlanMsg{
+			sourcePath: sourcePath,
+			targetDir:  targetDir,
+			targetPath: filepath.Join(targetDir, filepath.Base(sourcePath)),
+			overwrite:  overwrite,
+			stats:      stats,
+			err:        err,
+		}
 	}
+}
+
+func waitCopyProgressCmd(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
+}
+
+func dismissNoticeCmd(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return dismissNoticeMsg{}
+	})
+}
+
+func (m *Model) startCopyJob(sourcePath, targetDir string, overwrite bool, stats vfs.TransferStats) tea.Cmd {
+	m.nextCopyJob++
+	jobID := m.nextCopyJob
+	targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
+	m.copyJob = &copyJobState{
+		id:         jobID,
+		sourcePath: sourcePath,
+		targetDir:  targetDir,
+		targetPath: targetPath,
+		overwrite:  overwrite,
+		progress: vfs.CopyProgress{
+			FilesDone:   0,
+			FilesTotal:  stats.FilesTotal,
+			BytesDone:   0,
+			BytesTotal:  stats.BytesTotal,
+			CurrentPath: sourcePath,
+		},
+	}
+	m.modal = modalState{kind: modalCopyProgress}
+	m.status = "Copy started"
+
+	return tea.Batch(
+		func() tea.Msg {
+			go func() {
+				target, err := vfs.CopyPathWithProgress(sourcePath, targetDir, overwrite, stats, func(progress vfs.CopyProgress) {
+					m.copyProgress <- copyProgressMsg{jobID: jobID, progress: progress}
+				})
+				m.copyProgress <- copyDoneMsg{
+					jobID:      jobID,
+					sourcePath: sourcePath,
+					targetPath: target,
+					err:        err,
+				}
+			}()
+			return nil
+		},
+		waitCopyProgressCmd(m.copyProgress),
+	)
 }
 
 func moveCmd(sourcePath, targetDir string, overwrite bool) tea.Cmd {
@@ -1288,6 +1604,16 @@ func formatSize(size int64, human bool) string {
 		return vfs.HumanSize(size)
 	}
 	return fmt.Sprintf("%d", size)
+}
+
+func formatCopyStatus(progress vfs.CopyProgress) string {
+	return fmt.Sprintf(
+		"Copy in background: %d/%d files, %s/%s",
+		progress.FilesDone,
+		progress.FilesTotal,
+		formatSize(progress.BytesDone, true),
+		formatSize(progress.BytesTotal, true),
+	)
 }
 
 func operationVerb(kind fileOpKind) string {
