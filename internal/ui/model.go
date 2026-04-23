@@ -77,6 +77,7 @@ type opMsg struct {
 }
 
 type copyPlanMsg struct {
+	kind       fileOpKind
 	sourcePath string
 	targetDir  string
 	targetPath string
@@ -92,6 +93,7 @@ type copyProgressMsg struct {
 
 type copyDoneMsg struct {
 	jobID      int
+	kind       fileOpKind
 	sourcePath string
 	targetPath string
 	err        error
@@ -101,6 +103,7 @@ type dismissNoticeMsg struct{}
 
 type copyJobState struct {
 	id         int
+	kind       fileOpKind
 	sourcePath string
 	targetDir  string
 	targetPath string
@@ -263,20 +266,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		title := "Copy selected entry?"
+		verb := operationVerb(msg.kind)
+		title := fmt.Sprintf("%s selected entry?", strings.Title(verb))
 		body := strings.Join([]string{
 			fmt.Sprintf("From: %s", msg.sourcePath),
 			fmt.Sprintf("To:   %s", msg.targetPath),
 			"",
 			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
-			fmt.Sprintf("Data:  %s", formatSize(msg.stats.BytesTotal, true)),
+			fmt.Sprintf("Size:  %s", formatSize(msg.stats.BytesTotal, true)),
 		}, "\n")
 		if msg.overwrite {
 			body += "\n\nTarget exists and will be overwritten."
 		}
-		note := "Enter/y to start copy, Esc/n to cancel"
+		note := fmt.Sprintf("Enter/y to start %s, Esc/n to cancel", verb)
 		m.openConfirmModal(title, body, note, pendingOperation{
-			kind:       opCopy,
+			kind:       msg.kind,
 			sourcePath: msg.sourcePath,
 			targetDir:  msg.targetDir,
 			overwrite:  msg.overwrite,
@@ -290,7 +294,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.copyJob.progress = msg.progress
 		if m.copyJob.background {
-			m.status = formatCopyStatus(msg.progress)
+			m.status = formatCopyStatus(m.copyJob.kind, msg.progress)
 		}
 		return m, waitCopyProgressCmd(m.copyProgress)
 
@@ -301,7 +305,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.busy = false
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Copy failed: %v", msg.err)
+			m.status = fmt.Sprintf("%s failed: %v", strings.Title(operationVerb(msg.kind)), msg.err)
 			m.copyJob = nil
 			if m.modal.kind == modalCopyProgress {
 				m.modal = modalState{}
@@ -309,11 +313,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.status = fmt.Sprintf("Copied to %s", msg.targetPath)
+		m.status = fmt.Sprintf("%s to %s", operationDoneLabel(msg.kind), msg.targetPath)
 		activeSelection := selectedName(m.activePane())
 		_ = m.reloadPane(PaneLeft, activeSelection)
 		_ = m.reloadPane(PaneRight, activeSelection)
 		background := m.copyJob.background
+		kind := m.copyJob.kind
 		m.copyJob = nil
 
 		cmd := m.loadPreviewCmd()
@@ -321,10 +326,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.modal = modalState{}
 		}
 		if background {
+			doneWord := "copied"
+			if kind == opMove {
+				doneWord = "moved"
+			}
 			m.modal = modalState{
 				kind:  modalNotice,
-				title: "Copy complete",
-				body:  filepath.Base(msg.sourcePath) + " copied successfully.",
+				title: strings.Title(operationVerb(kind)) + " complete",
+				body:  filepath.Base(msg.sourcePath) + " " + doneWord + " successfully.",
 			}
 			cmd = tea.Batch(cmd, dismissNoticeCmd(time.Second))
 		}
@@ -508,13 +517,13 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			pending := *m.modal.pending
 			m.modal = modalState{}
-			if pending.kind == opCopy {
+			if pending.kind == opCopy || pending.kind == opMove {
 				if m.copyJob != nil {
-					m.status = "Copy is already running"
+					m.status = "Transfer is already running"
 					return m, nil
 				}
 				m.busy = true
-				return m, m.startCopyJob(pending.sourcePath, pending.targetDir, pending.overwrite, pending.stats)
+				return m, m.startCopyJob(pending.kind, pending.sourcePath, pending.targetDir, pending.overwrite, pending.stats)
 			}
 			m.busy = true
 			return m, pending.cmd()
@@ -528,7 +537,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.copyJob.background = true
 			m.modal = modalState{}
-			m.status = "Copy continues in background"
+			m.status = "Transfer continues in background"
 			return m, nil
 		}
 		return m, nil
@@ -704,9 +713,9 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if kind == opCopy {
+	if kind == opCopy || kind == opMove {
 		if m.copyJob != nil {
-			m.status = "Copy is already running"
+			m.status = "Transfer is already running"
 			return m, nil
 		}
 
@@ -715,8 +724,8 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 			overwrite = true
 		}
 		m.busy = true
-		m.status = fmt.Sprintf("Calculating copy size for %s", selected.DisplayName())
-		return m, copyPlanCmd(selected.Path, targetDir, overwrite)
+		m.status = fmt.Sprintf("Calculating %s size for %s", operationVerb(kind), selected.DisplayName())
+		return m, copyPlanCmd(kind, selected.Path, targetDir, overwrite)
 	}
 
 	if exists && m.cfg.Behavior.ConfirmOverwrite {
@@ -1340,13 +1349,13 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 	}
 
 	lines := []string{
-		titleStyle.Render("Copying"),
+		titleStyle.Render(progressTitle(job.kind)),
 		lineStyle.Render(fmt.Sprintf("From: %s", job.sourcePath)),
 		lineStyle.Render(fmt.Sprintf("To:   %s", job.targetPath)),
 		spacer,
 		lineStyle.Render(renderProgressBar(ratio, max(width-8, 10), palette)),
 		lineStyle.Render(fmt.Sprintf("Files: %d / %d", progress.FilesDone, progress.FilesTotal)),
-		lineStyle.Render(fmt.Sprintf("Data:  %s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true))),
+		lineStyle.Render(fmt.Sprintf("Size:  %s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true))),
 	}
 
 	if strings.TrimSpace(progress.CurrentPath) != "" {
@@ -1490,10 +1499,11 @@ func dirSizeCmd(path string) tea.Cmd {
 	}
 }
 
-func copyPlanCmd(sourcePath, targetDir string, overwrite bool) tea.Cmd {
+func copyPlanCmd(kind fileOpKind, sourcePath, targetDir string, overwrite bool) tea.Cmd {
 	return func() tea.Msg {
 		stats, err := vfs.CopyStats(sourcePath)
 		return copyPlanMsg{
+			kind:       kind,
 			sourcePath: sourcePath,
 			targetDir:  targetDir,
 			targetPath: filepath.Join(targetDir, filepath.Base(sourcePath)),
@@ -1516,12 +1526,13 @@ func dismissNoticeCmd(delay time.Duration) tea.Cmd {
 	})
 }
 
-func (m *Model) startCopyJob(sourcePath, targetDir string, overwrite bool, stats vfs.TransferStats) tea.Cmd {
+func (m *Model) startCopyJob(kind fileOpKind, sourcePath, targetDir string, overwrite bool, stats vfs.TransferStats) tea.Cmd {
 	m.nextCopyJob++
 	jobID := m.nextCopyJob
 	targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
 	m.copyJob = &copyJobState{
 		id:         jobID,
+		kind:       kind,
 		sourcePath: sourcePath,
 		targetDir:  targetDir,
 		targetPath: targetPath,
@@ -1535,16 +1546,27 @@ func (m *Model) startCopyJob(sourcePath, targetDir string, overwrite bool, stats
 		},
 	}
 	m.modal = modalState{kind: modalCopyProgress}
-	m.status = "Copy started"
+	m.status = strings.Title(operationVerb(kind)) + " started"
 
 	return tea.Batch(
 		func() tea.Msg {
 			go func() {
-				target, err := vfs.CopyPathWithProgress(sourcePath, targetDir, overwrite, stats, func(progress vfs.CopyProgress) {
+				var (
+					target string
+					err    error
+				)
+				progressFn := func(progress vfs.CopyProgress) {
 					m.copyProgress <- copyProgressMsg{jobID: jobID, progress: progress}
-				})
+				}
+				switch kind {
+				case opMove:
+					target, err = vfs.MovePathWithProgress(sourcePath, targetDir, overwrite, stats, progressFn)
+				default:
+					target, err = vfs.CopyPathWithProgress(sourcePath, targetDir, overwrite, stats, progressFn)
+				}
 				m.copyProgress <- copyDoneMsg{
 					jobID:      jobID,
+					kind:       kind,
 					sourcePath: sourcePath,
 					targetPath: target,
 					err:        err,
@@ -1606,14 +1628,37 @@ func formatSize(size int64, human bool) string {
 	return fmt.Sprintf("%d", size)
 }
 
-func formatCopyStatus(progress vfs.CopyProgress) string {
+func formatCopyStatus(kind fileOpKind, progress vfs.CopyProgress) string {
 	return fmt.Sprintf(
-		"Copy in background: %d/%d files, %s/%s",
+		"%s in background: %d/%d files, %s/%s",
+		strings.Title(operationVerb(kind)),
 		progress.FilesDone,
 		progress.FilesTotal,
 		formatSize(progress.BytesDone, true),
 		formatSize(progress.BytesTotal, true),
 	)
+}
+
+func progressTitle(kind fileOpKind) string {
+	switch kind {
+	case opMove:
+		return "Moving"
+	default:
+		return "Copying"
+	}
+}
+
+func operationDoneLabel(kind fileOpKind) string {
+	switch kind {
+	case opMove:
+		return "Moved"
+	case opCopy:
+		return "Copied"
+	case opDelete:
+		return "Deleted"
+	default:
+		return "Done"
+	}
 }
 
 func operationVerb(kind fileOpKind) string {

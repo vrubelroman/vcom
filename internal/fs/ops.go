@@ -141,6 +141,10 @@ func CopyPathWithProgress(srcPath string, dstDir string, overwrite bool, stats T
 }
 
 func MovePath(srcPath string, dstDir string, overwrite bool) (string, error) {
+	return MovePathWithProgress(srcPath, dstDir, overwrite, TransferStats{}, nil)
+}
+
+func MovePathWithProgress(srcPath string, dstDir string, overwrite bool, stats TransferStats, progress func(CopyProgress)) (string, error) {
 	targetPath := filepath.Join(dstDir, filepath.Base(srcPath))
 	if same, err := samePath(srcPath, targetPath); err != nil {
 		return "", err
@@ -159,13 +163,31 @@ func MovePath(srcPath string, dstDir string, overwrite bool) (string, error) {
 		}
 	}
 
+	if progress == nil {
+		progress = func(CopyProgress) {}
+	}
+	if stats.FilesTotal == 0 && stats.BytesTotal == 0 {
+		resolved, err := CopyStats(srcPath)
+		if err != nil {
+			return "", err
+		}
+		stats = resolved
+	}
+
 	if err := os.Rename(srcPath, targetPath); err == nil {
+		progress(CopyProgress{
+			FilesDone:   stats.FilesTotal,
+			FilesTotal:  stats.FilesTotal,
+			BytesDone:   stats.BytesTotal,
+			BytesTotal:  stats.BytesTotal,
+			CurrentPath: srcPath,
+		})
 		return targetPath, nil
 	} else if !errors.Is(err, syscall.EXDEV) {
 		return "", err
 	}
 
-	targetPath, err := CopyPath(srcPath, dstDir, overwrite)
+	targetPath, err := CopyPathWithProgress(srcPath, dstDir, overwrite, stats, progress)
 	if err != nil {
 		return "", err
 	}
