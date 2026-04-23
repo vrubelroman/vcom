@@ -1390,7 +1390,7 @@ func renderStatus(m Model) string {
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Padding(0, 1).
-		Background(m.palette.PanelInactive).
+		Background(m.palette.StatusBar).
 		Foreground(m.palette.Text).
 		Render(summary + "  ::  " + m.status)
 }
@@ -1403,12 +1403,12 @@ func renderFooter(m Model) string {
 			continue
 		}
 		keyView := lipgloss.NewStyle().
-			Background(m.palette.Background).
+			Background(m.palette.Footer).
 			Foreground(m.palette.FooterKey).
 			Bold(true).
 			Render(help.Key)
 		descView := lipgloss.NewStyle().
-			Background(m.palette.Background).
+			Background(m.palette.Footer).
 			Foreground(m.palette.Text).
 			Render(" " + help.Desc)
 		parts = append(parts, keyView+descView)
@@ -1416,7 +1416,7 @@ func renderFooter(m Model) string {
 	line := strings.Join(parts, "   ")
 	if m.selectMode {
 		modeLabel := lipgloss.NewStyle().
-			Foreground(m.palette.Accent).
+			Foreground(m.palette.Info).
 			Bold(true).
 			Render("SELECT TEXT MODE")
 		if line != "" {
@@ -1429,7 +1429,7 @@ func renderFooter(m Model) string {
 		m.width,
 		lipgloss.Left,
 		line,
-		lipgloss.WithWhitespaceBackground(m.palette.Background),
+		lipgloss.WithWhitespaceBackground(m.palette.Footer),
 	)
 }
 
@@ -1557,7 +1557,7 @@ func renderConfirmActions(width int, palette theme.Palette) string {
 	confirm := lipgloss.NewStyle().
 		Width(buttonWidth).
 		Align(lipgloss.Center).
-		Background(palette.TextFile).
+		Background(palette.ConfirmButton).
 		Foreground(palette.Background).
 		Bold(true).
 		Render("Enter / y")
@@ -1565,7 +1565,7 @@ func renderConfirmActions(width int, palette theme.Palette) string {
 	cancel := lipgloss.NewStyle().
 		Width(buttonWidth).
 		Align(lipgloss.Center).
-		Background(palette.Danger).
+		Background(palette.CancelButton).
 		Foreground(palette.Background).
 		Bold(true).
 		Render("Esc / n")
@@ -1604,7 +1604,6 @@ func renderHelpModal(modal modalState, palette theme.Palette, width int) string 
 	noteStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.FooterKey).Bold(true)
 	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
 
-	sectionColors := []lipgloss.Color{palette.Accent, palette.Warning, palette.FooterKey, palette.Danger}
 	keyColStyle := lipgloss.NewStyle().Width(24).Background(palette.Panel).Foreground(palette.FooterKey).Bold(true)
 	descColStyle := lipgloss.NewStyle().Background(palette.Panel).Foreground(palette.Text)
 
@@ -1618,7 +1617,6 @@ func renderHelpModal(modal modalState, palette theme.Palette, width int) string 
 		BorderBackground(palette.Panel)
 
 	lines := []string{titleStyle.Render(modal.title), spacer}
-	sectionIdx := 0
 	for _, raw := range strings.Split(modal.body, "\n") {
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
@@ -1642,8 +1640,7 @@ func renderHelpModal(modal modalState, palette theme.Palette, width int) string 
 			continue
 		}
 
-		sectionColor := sectionColorForHeader(trimmed, sectionIdx, sectionColors, palette)
-		sectionIdx++
+		sectionColor := sectionColorForHeader(trimmed, palette)
 		header := lipgloss.NewStyle().
 			Width(contentWidth).
 			Background(palette.Panel).
@@ -1674,18 +1671,18 @@ func splitHelpItem(raw string) (string, string) {
 	return value, ""
 }
 
-func sectionColorForHeader(header string, idx int, fallback []lipgloss.Color, palette theme.Palette) lipgloss.Color {
+func sectionColorForHeader(header string, palette theme.Palette) lipgloss.Color {
 	switch header {
 	case "Navigation":
-		return palette.Folder
+		return palette.HelpNav
 	case "View and Panels":
-		return fallback[1]
+		return palette.HelpPanels
 	case "Dialogs and Transfers":
-		return palette.BinaryFile
+		return palette.HelpDialogs
 	case "Mouse":
-		return fallback[3]
+		return palette.HelpMouse
 	default:
-		return fallback[idx%len(fallback)]
+		return palette.Accent
 	}
 }
 
@@ -1749,8 +1746,8 @@ func renderProgressBar(ratio float64, width int, palette theme.Palette) string {
 		filled = 0
 	}
 
-	bar := lipgloss.NewStyle().Foreground(palette.Accent).Render(strings.Repeat("█", filled))
-	rest := lipgloss.NewStyle().Foreground(palette.Border).Render(strings.Repeat("░", width-filled))
+	bar := lipgloss.NewStyle().Foreground(palette.ProgressFill).Render(strings.Repeat("█", filled))
+	rest := lipgloss.NewStyle().Foreground(palette.ProgressEmpty).Render(strings.Repeat("░", width-filled))
 	percent := fmt.Sprintf(" %3.0f%%", ratio*100)
 	return bar + rest + percent
 }

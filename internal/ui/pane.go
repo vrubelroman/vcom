@@ -222,7 +222,7 @@ func renderPaneHeader(pane BrowserPane, cfg config.Config, palette theme.Palette
 		Foreground(palette.Text).
 		Bold(active)
 	if active {
-		pathStyle = pathStyle.Foreground(palette.TextFile)
+		pathStyle = pathStyle.Foreground(palette.ActivePath)
 	}
 
 	return lipgloss.NewStyle().
@@ -292,11 +292,11 @@ func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool
 	rowBackground := baseBackground
 	switch {
 	case marked:
-		rowBackground = palette.Danger
+		rowBackground = palette.Marked
 	case selected:
 		rowBackground = palette.Selection
 	case hovered:
-		rowBackground = palette.PanelElevated
+		rowBackground = palette.Hover
 	}
 
 	parts := make([]string, 0, len(columns))
