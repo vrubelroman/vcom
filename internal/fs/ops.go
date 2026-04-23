@@ -23,6 +23,7 @@ type CopyProgress struct {
 	BytesDone   int64
 	BytesTotal  int64
 	CurrentPath string
+	Stage       string
 }
 
 type copyProgressState struct {
@@ -106,6 +107,9 @@ func CopyPathWithProgressContext(ctx context.Context, srcPath string, dstDir str
 
 	if srcInfo.IsDir() {
 		if err := copyDir(srcPath, targetPath, &tracker); err != nil {
+			return cleanupOnErr(err)
+		}
+		if err := ctx.Err(); err != nil {
 			return cleanupOnErr(err)
 		}
 		tracker.emit(srcPath, true)
@@ -215,6 +219,7 @@ func MovePathWithProgressContext(ctx context.Context, srcPath string, dstDir str
 			BytesDone:   stats.BytesTotal,
 			BytesTotal:  stats.BytesTotal,
 			CurrentPath: srcPath,
+			Stage:       "Move completed",
 		})
 		return targetPath, nil
 	} else if !errors.Is(err, syscall.EXDEV) {
@@ -229,6 +234,14 @@ func MovePathWithProgressContext(ctx context.Context, srcPath string, dstDir str
 		_ = os.RemoveAll(targetPath)
 		return "", err
 	}
+	progress(CopyProgress{
+		FilesDone:   stats.FilesTotal,
+		FilesTotal:  stats.FilesTotal,
+		BytesDone:   stats.BytesTotal,
+		BytesTotal:  stats.BytesTotal,
+		CurrentPath: srcPath,
+		Stage:       "Finalizing move",
+	})
 	if err := DeletePath(srcPath); err != nil {
 		return "", err
 	}
@@ -313,6 +326,12 @@ func copyDir(srcDir string, dstDir string, tracker *copyProgressState) error {
 		}
 	}
 
+	if tracker != nil && tracker.ctx != nil {
+		if err := tracker.ctx.Err(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -342,6 +361,13 @@ func copyFile(srcPath string, dstPath string, mode os.FileMode, tracker *copyPro
 		_ = dstFile.Close()
 		_ = os.Remove(dstPath)
 		return err
+	}
+	if tracker != nil && tracker.ctx != nil {
+		if err := tracker.ctx.Err(); err != nil {
+			_ = dstFile.Close()
+			_ = os.Remove(dstPath)
+			return err
+		}
 	}
 	if tracker != nil {
 		tracker.finishFile(srcPath)
@@ -392,6 +418,7 @@ func (s *copyProgressState) emit(currentPath string, force bool) {
 		BytesDone:   s.bytesDone,
 		BytesTotal:  s.stats.BytesTotal,
 		CurrentPath: currentPath,
+		Stage:       "Transferring data",
 	})
 }
 

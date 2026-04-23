@@ -337,6 +337,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.busy = false
 		if msg.err != nil {
+			activeSelection := selectedName(m.activePane())
+			_ = m.reloadPane(PaneLeft, activeSelection)
+			_ = m.reloadPane(PaneRight, activeSelection)
 			if msg.err == context.Canceled {
 				m.status = strings.Title(operationVerb(msg.kind)) + " cancelled"
 			} else {
@@ -346,7 +349,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.modal.kind == modalCopyProgress {
 				m.modal = modalState{}
 			}
-			return m, nil
+			return m, m.loadPreviewCmd()
 		}
 
 		m.status = fmt.Sprintf("%s %d entr%s to %s", operationDoneLabel(msg.kind), len(msg.sourcePaths), pluralSuffix(len(msg.sourcePaths), "y", "ies"), msg.targetDir)
@@ -1699,7 +1702,6 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 	outerWidth := max(width, 8)
 	contentWidth := max(outerWidth-6, 1)
 	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
-	lineStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Text)
 	mutedStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
 	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
 
@@ -1721,9 +1723,11 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 	lines := []string{
 		titleStyle.Render(progressTitle(job.kind)),
 		spacer,
-		lineStyle.Render(renderProgressBar(ratio, max(contentWidth-8, 10), palette)),
+		renderProgressBarLine(ratio, contentWidth, palette),
 		spacer,
 		renderProgressPercentLine(ratio, contentWidth, palette),
+		renderProgressStatLine("Stage:", progressStageLabel(progress, job.kind), contentWidth, palette),
+		spacer,
 		renderProgressStatLine("Files:", fmt.Sprintf("%d / %d", progress.FilesDone, progress.FilesTotal), contentWidth, palette),
 		renderProgressStatLine("Size:", fmt.Sprintf("%s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true)), contentWidth, palette),
 		renderProgressStatLine("Speed:", transferSpeed(progress.BytesDone, job.startedAt), contentWidth, palette),
@@ -1760,6 +1764,28 @@ func renderProgressBar(ratio float64, width int, palette theme.Palette) string {
 	return bar + rest
 }
 
+func renderProgressBarLine(ratio float64, width int, palette theme.Palette) string {
+	sidePad := max(width/8, 6)
+	barWidth := max(width-(sidePad*2), 10)
+	rightPad := max(width-sidePad-barWidth, 0)
+	left := lipgloss.NewStyle().
+		Width(sidePad).
+		Background(palette.Panel).
+		Render("")
+	bar := lipgloss.NewStyle().
+		Width(barWidth).
+		Background(palette.Panel).
+		Render(renderProgressBar(ratio, barWidth, palette))
+	right := lipgloss.NewStyle().
+		Width(rightPad).
+		Background(palette.Panel).
+		Render("")
+	return lipgloss.NewStyle().
+		Width(width).
+		Background(palette.Panel).
+		Render(left + bar + right)
+}
+
 func renderProgressStatLine(label string, value string, width int, palette theme.Palette) string {
 	keyWidth := min(max(lipgloss.Width(label)+1, 8), width)
 	valueWidth := max(width-keyWidth, 0)
@@ -1778,10 +1804,10 @@ func renderProgressStatLine(label string, value string, width int, palette theme
 func renderProgressActions(width int, palette theme.Palette) string {
 	const minButtonWidth = 14
 	const maxButtonWidth = 18
-	const gapWidth = 4
 	labelWidth := max(lipgloss.Width("Background / b"), lipgloss.Width("Cancel / c"))
 	buttonWidth := min(max(labelWidth+2, minButtonWidth), maxButtonWidth)
-	buttonWidth = min(buttonWidth, max((width-gapWidth)/2, labelWidth))
+	edgePad := max(width/8, 6)
+	buttonWidth = min(buttonWidth, max((width-(edgePad*2)-4)/2, labelWidth))
 
 	backgroundBtn := lipgloss.NewStyle().
 		Width(buttonWidth).
@@ -1798,25 +1824,21 @@ func renderProgressActions(width int, palette theme.Palette) string {
 		Bold(true).
 		Render("Cancel / c")
 
-	gap := lipgloss.NewStyle().
-		Width(gapWidth).
+	leftPad := lipgloss.NewStyle().
+		Width(edgePad).
 		Background(palette.Panel).
 		Render("")
-	backgroundBias := lipgloss.NewStyle().
-		Width(10).
+	rightPadWidth := edgePad
+	centerGapWidth := max(width-edgePad-rightPadWidth-(buttonWidth*2), 0)
+	centerGap := lipgloss.NewStyle().
+		Width(centerGapWidth).
 		Background(palette.Panel).
 		Render("")
-	cancelBias := lipgloss.NewStyle().
-		Width(4).
+	rightPad := lipgloss.NewStyle().
+		Width(rightPadWidth).
 		Background(palette.Panel).
 		Render("")
-	group := lipgloss.JoinHorizontal(lipgloss.Top, backgroundBtn, backgroundBias, gap, cancelBtn, cancelBias)
-	row := lipgloss.PlaceHorizontal(
-		width,
-		lipgloss.Center,
-		group,
-		lipgloss.WithWhitespaceBackground(palette.Panel),
-	)
+	row := leftPad + backgroundBtn + centerGap + cancelBtn + rightPad
 	return lipgloss.NewStyle().
 		Width(width).
 		Background(palette.Panel).
@@ -1825,14 +1847,12 @@ func renderProgressActions(width int, palette theme.Palette) string {
 
 func renderProgressPercentLine(ratio float64, width int, palette theme.Palette) string {
 	percent := lipgloss.NewStyle().
-		Foreground(palette.Info).
-		Bold(true).
-		Render(fmt.Sprintf("%3.0f%%", ratio*100))
-	return lipgloss.NewStyle().
 		Width(width).
 		Background(palette.Panel).
-		Align(lipgloss.Right).
-		Render(percent)
+		Foreground(palette.Info).
+		Bold(true).
+		Render(fmt.Sprintf("%.0f%%", ratio*100))
+	return percent
 }
 
 func transferSpeed(bytesDone int64, startedAt time.Time) string {
@@ -1848,6 +1868,25 @@ func transferSpeed(bytesDone int64, startedAt time.Time) string {
 		return "calculating..."
 	}
 	return fmt.Sprintf("%s/s", vfs.HumanSize(perSecond))
+}
+
+func progressStageLabel(progress vfs.CopyProgress, kind fileOpKind) string {
+	if strings.TrimSpace(progress.Stage) != "" {
+		if progress.Stage == "Transferring data" && progress.BytesTotal > 0 && progress.BytesDone >= progress.BytesTotal {
+			if progress.FilesDone < progress.FilesTotal {
+				return "Finalizing file"
+			}
+			if kind == opMove {
+				return "Preparing move finalization"
+			}
+			return "Finalizing transfer"
+		}
+		return progress.Stage
+	}
+	if kind == opMove {
+		return "Preparing move"
+	}
+	return "Transferring data"
 }
 
 func overlayCenter(base string, overlay string, width int) string {
@@ -2057,6 +2096,7 @@ func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir st
 								BytesDone:   doneBytes + progress.BytesDone,
 								BytesTotal:  stats.BytesTotal,
 								CurrentPath: progress.CurrentPath,
+								Stage:       progress.Stage,
 							},
 						}
 					}
