@@ -43,11 +43,12 @@ const (
 )
 
 type pendingOperation struct {
-	kind       fileOpKind
-	sourcePath string
-	targetDir  string
-	overwrite  bool
-	stats      vfs.TransferStats
+	kind            fileOpKind
+	sourcePaths     []string
+	targetDir       string
+	overwrite       bool
+	existingTargets int
+	stats           vfs.TransferStats
 }
 
 type modalState struct {
@@ -78,13 +79,13 @@ type opMsg struct {
 }
 
 type copyPlanMsg struct {
-	kind       fileOpKind
-	sourcePath string
-	targetDir  string
-	targetPath string
-	overwrite  bool
-	stats      vfs.TransferStats
-	err        error
+	kind            fileOpKind
+	sourcePaths     []string
+	targetDir       string
+	overwrite       bool
+	existingTargets int
+	stats           vfs.TransferStats
+	err             error
 }
 
 type copyProgressMsg struct {
@@ -93,24 +94,23 @@ type copyProgressMsg struct {
 }
 
 type copyDoneMsg struct {
-	jobID      int
-	kind       fileOpKind
-	sourcePath string
-	targetPath string
-	err        error
+	jobID       int
+	kind        fileOpKind
+	sourcePaths []string
+	targetDir   string
+	err         error
 }
 
 type dismissNoticeMsg struct{}
 
 type copyJobState struct {
-	id         int
-	kind       fileOpKind
-	sourcePath string
-	targetDir  string
-	targetPath string
-	progress   vfs.CopyProgress
-	overwrite  bool
-	background bool
+	id          int
+	kind        fileOpKind
+	sourcePaths []string
+	targetDir   string
+	progress    vfs.CopyProgress
+	overwrite   bool
+	background  bool
 }
 
 type mouseClickState struct {
@@ -245,6 +245,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Moved to %s", msg.targetPath)
 		case opDelete:
 			m.status = "Deleted"
+			m.activePane().ClearMarks()
 		case opMkdir:
 			m.status = fmt.Sprintf("Created %s", msg.targetPath)
 		case opEdit:
@@ -269,23 +270,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		verb := operationVerb(msg.kind)
 		title := fmt.Sprintf("%s selected entry?", strings.Title(verb))
+		fromLabel := msg.sourcePaths[0]
+		if len(msg.sourcePaths) > 1 {
+			fromLabel = fmt.Sprintf("%d selected entries", len(msg.sourcePaths))
+		}
 		body := strings.Join([]string{
-			fmt.Sprintf("From: %s", msg.sourcePath),
-			fmt.Sprintf("To:   %s", msg.targetPath),
+			fmt.Sprintf("From: %s", fromLabel),
+			fmt.Sprintf("To:   %s", msg.targetDir),
 			"",
 			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
 			fmt.Sprintf("Size:  %s", formatSize(msg.stats.BytesTotal, true)),
 		}, "\n")
-		if msg.overwrite {
-			body += "\n\nTarget exists and will be overwritten."
+		if msg.existingTargets > 0 {
+			body += fmt.Sprintf("\n\nExisting targets: %d (will be overwritten)", msg.existingTargets)
 		}
 		note := fmt.Sprintf("Enter/y to start %s, Esc/n to cancel", verb)
 		m.openConfirmModal(title, body, note, pendingOperation{
-			kind:       msg.kind,
-			sourcePath: msg.sourcePath,
-			targetDir:  msg.targetDir,
-			overwrite:  msg.overwrite,
-			stats:      msg.stats,
+			kind:            msg.kind,
+			sourcePaths:     append([]string(nil), msg.sourcePaths...),
+			targetDir:       msg.targetDir,
+			overwrite:       msg.overwrite,
+			existingTargets: msg.existingTargets,
+			stats:           msg.stats,
 		})
 		return m, nil
 
@@ -314,13 +320,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.status = fmt.Sprintf("%s to %s", operationDoneLabel(msg.kind), msg.targetPath)
+		m.status = fmt.Sprintf("%s %d entr%s to %s", operationDoneLabel(msg.kind), len(msg.sourcePaths), pluralSuffix(len(msg.sourcePaths), "y", "ies"), msg.targetDir)
 		activeSelection := selectedName(m.activePane())
 		_ = m.reloadPane(PaneLeft, activeSelection)
 		_ = m.reloadPane(PaneRight, activeSelection)
 		background := m.copyJob.background
 		kind := m.copyJob.kind
+		sourceCount := len(m.copyJob.sourcePaths)
 		m.copyJob = nil
+		m.activePane().ClearMarks()
 
 		cmd := m.loadPreviewCmd()
 		if m.modal.kind == modalCopyProgress {
@@ -331,10 +339,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if kind == opMove {
 				doneWord = "moved"
 			}
+			doneBody := fmt.Sprintf("%d entr%s %s successfully.", sourceCount, pluralSuffix(sourceCount, "y", "ies"), doneWord)
+			if sourceCount == 1 && len(msg.sourcePaths) == 1 {
+				doneBody = filepath.Base(msg.sourcePaths[0]) + " " + doneWord + " successfully."
+			}
 			m.modal = modalState{
 				kind:  modalNotice,
 				title: strings.Title(operationVerb(kind)) + " complete",
-				body:  filepath.Base(msg.sourcePath) + " " + doneWord + " successfully.",
+				body:  doneBody,
 			}
 			cmd = tea.Batch(cmd, dismissNoticeCmd(time.Second))
 		}
@@ -357,6 +369,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Help):
 			m.openHelpModal()
 			return m, nil
+		case key.Matches(msg, m.keys.Cancel):
+			if len(m.activePane().MarkedEntries()) > 0 {
+				m.activePane().ClearMarks()
+				m.status = "Selection cleared"
+				return m, m.loadPreviewCmd()
+			}
+			return m, nil
 		case key.Matches(msg, m.keys.View):
 			return m.handleView()
 		case key.Matches(msg, m.keys.Edit):
@@ -372,6 +391,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.CycleSort):
 			return m.cycleSort()
 		case key.Matches(msg, m.keys.Switch):
+			m.left.ClearMarks()
+			m.right.ClearMarks()
 			if m.active == PaneLeft {
 				m.active = PaneRight
 			} else {
@@ -384,6 +405,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadPreviewCmd()
 		case key.Matches(msg, m.keys.Down):
 			m.moveCursor(1)
+			return m, m.loadPreviewCmd()
+		case key.Matches(msg, m.keys.SelectUp):
+			m.selectMoveCursor(-1)
+			return m, m.loadPreviewCmd()
+		case key.Matches(msg, m.keys.SelectDown):
+			m.selectMoveCursor(1)
 			return m, m.loadPreviewCmd()
 		case key.Matches(msg, m.keys.PageUp):
 			m.moveCursor(-max(m.bodyHeight()-6, 5))
@@ -528,7 +555,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.busy = true
-				return m, m.startCopyJob(pending.kind, pending.sourcePath, pending.targetDir, pending.overwrite, pending.stats)
+				return m, m.startCopyJob(pending.kind, pending.sourcePaths, pending.targetDir, pending.overwrite, pending.stats)
 			}
 			m.busy = true
 			return m, pending.cmd()
@@ -612,6 +639,35 @@ func (m *Model) moveCursor(delta int) {
 	pane := m.activePane()
 	pane.Move(delta, max(m.bodyHeight()-4, 1))
 	m.hover = hoverState{}
+}
+
+func (m *Model) selectMoveCursor(delta int) {
+	pane := m.activePane()
+	if selected, ok := pane.Selected(); ok && !selected.IsParent {
+		pane.ToggleMarked(selected.Path)
+	}
+	pane.Move(delta, max(m.bodyHeight()-4, 1))
+	m.hover = hoverState{}
+}
+
+func (m *Model) operationSources() []string {
+	pane := m.activePane()
+	marked := pane.MarkedEntries()
+	if len(marked) > 0 {
+		paths := make([]string, 0, len(marked))
+		for _, entry := range marked {
+			if entry.IsParent {
+				continue
+			}
+			paths = append(paths, entry.Path)
+		}
+		return paths
+	}
+	selected, ok := pane.Selected()
+	if !ok || selected.IsParent {
+		return nil
+	}
+	return []string{selected.Path}
 }
 
 func (m *Model) enterSelected() error {
@@ -725,18 +781,24 @@ func (m *Model) handleDirSize() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
-	selected, ok := m.activePane().Selected()
-	if !ok || selected.IsParent {
+	sources := m.operationSources()
+	if len(sources) == 0 {
 		m.status = fmt.Sprintf("Nothing to %s", operationVerb(kind))
 		return m, nil
 	}
 
 	targetDir := m.passivePane().Path
-	targetPath := filepath.Join(targetDir, filepath.Base(selected.Path))
-	exists, err := vfs.PathExists(targetPath)
-	if err != nil {
-		m.status = err.Error()
-		return m, nil
+	existingTargets := 0
+	for _, sourcePath := range sources {
+		targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
+		exists, err := vfs.PathExists(targetPath)
+		if err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		if exists {
+			existingTargets++
+		}
 	}
 
 	if kind == opCopy || kind == opMove {
@@ -745,52 +807,40 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		overwrite := exists
-		if exists && !m.cfg.Behavior.ConfirmOverwrite {
+		overwrite := existingTargets > 0
+		if existingTargets > 0 && !m.cfg.Behavior.ConfirmOverwrite {
 			overwrite = true
 		}
 		m.busy = true
-		m.status = fmt.Sprintf("Calculating %s size for %s", operationVerb(kind), selected.DisplayName())
-		return m, copyPlanCmd(kind, selected.Path, targetDir, overwrite)
+		m.status = fmt.Sprintf("Calculating %s size", operationVerb(kind))
+		return m, copyPlanCmd(kind, sources, targetDir, overwrite, existingTargets)
 	}
-
-	if exists && m.cfg.Behavior.ConfirmOverwrite {
-		title := fmt.Sprintf("Overwrite existing target before %s?", operationVerb(kind))
-		body := fmt.Sprintf("%s\n\n-> %s", selected.Path, targetPath)
-		note := "Enter/y to overwrite, Esc/n to cancel"
-		m.openConfirmModal(title, body, note, pendingOperation{
-			kind:       kind,
-			sourcePath: selected.Path,
-			targetDir:  targetDir,
-			overwrite:  true,
-		})
-		return m, nil
-	}
-
-	m.busy = true
-	m.status = fmt.Sprintf("%s %s", strings.Title(operationVerb(kind)), selected.DisplayName())
-	return m, operationCmd(kind, selected.Path, targetDir, exists)
+	return m, nil
 }
 
 func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
-	selected, ok := m.activePane().Selected()
-	if !ok || selected.IsParent {
+	sources := m.operationSources()
+	if len(sources) == 0 {
 		m.status = "Nothing to delete"
 		return m, nil
 	}
 	if !m.cfg.Behavior.ConfirmDelete {
 		m.busy = true
-		m.status = fmt.Sprintf("Deleting %s", selected.DisplayName())
-		return m, deleteCmd(selected.Path)
+		m.status = fmt.Sprintf("Deleting %d entr%s", len(sources), pluralSuffix(len(sources), "y", "ies"))
+		return m, deletePathsCmd(sources)
 	}
 
+	body := sources[0]
+	if len(sources) > 1 {
+		body = fmt.Sprintf("%d selected entries", len(sources))
+	}
 	m.openConfirmModal(
-		"Delete selected entry?",
-		selected.Path,
+		"Delete selected entr"+pluralSuffix(len(sources), "y", "ies")+"?",
+		body,
 		"Enter/y to delete permanently, Esc/n to cancel",
 		pendingOperation{
-			kind:       opDelete,
-			sourcePath: selected.Path,
+			kind:        opDelete,
+			sourcePaths: append([]string(nil), sources...),
 		},
 	)
 	return m, nil
@@ -883,6 +933,10 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.hover = hoverState{pane: paneID, index: index, ok: true}
+		if paneID != m.active {
+			m.left.ClearMarks()
+			m.right.ClearMarks()
+		}
 		m.active = paneID
 		pane := m.paneByID(paneID)
 		if index >= 0 && index < len(pane.Entries) {
@@ -920,6 +974,10 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 
 		m.hover = hoverState{pane: paneID, index: index, ok: true}
+		if paneID != m.active {
+			m.left.ClearMarks()
+			m.right.ClearMarks()
+		}
 		m.active = paneID
 		pane := m.paneByID(paneID)
 		if index >= 0 && index < len(pane.Entries) {
@@ -1030,6 +1088,8 @@ func (m *Model) openHelpModal() {
 		"Navigation",
 		"  j / Down       move down",
 		"  k / Up         move up",
+		"  Shift+Down/J   extend selection down",
+		"  Shift+Up/K     extend selection up",
 		"  PgDn / f       page down",
 		"  PgUp / b       page up",
 		"  Enter / Right  open selected entry",
@@ -1049,6 +1109,7 @@ func (m *Model) openHelpModal() {
 		"  Enter / y      confirm action",
 		"  Esc / n        cancel action",
 		"  b              run copy/move in background (progress dialog)",
+		"  F5/F6/F8       apply to marked entries when selection exists",
 		"",
 		"Mouse",
 		"  Left click     select entry and activate pane",
@@ -1511,8 +1572,8 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 
 	lines := []string{
 		titleStyle.Render(progressTitle(job.kind)),
-		lineStyle.Render(fmt.Sprintf("From: %s", job.sourcePath)),
-		lineStyle.Render(fmt.Sprintf("To:   %s", job.targetPath)),
+		lineStyle.Render(fmt.Sprintf("From: %s", transferSourceLabel(job.sourcePaths))),
+		lineStyle.Render(fmt.Sprintf("To:   %s", job.targetDir)),
 		spacer,
 		lineStyle.Render(renderProgressBar(ratio, max(width-8, 10), palette)),
 		lineStyle.Render(fmt.Sprintf("Files: %d / %d", progress.FilesDone, progress.FilesTotal)),
@@ -1628,9 +1689,9 @@ func previewIcon(preview vfs.Preview) string {
 func (p pendingOperation) cmd() tea.Cmd {
 	switch p.kind {
 	case opMove:
-		return moveCmd(p.sourcePath, p.targetDir, p.overwrite)
+		return nil
 	case opDelete:
-		return deleteCmd(p.sourcePath)
+		return deletePathsCmd(p.sourcePaths)
 	default:
 		return nil
 	}
@@ -1652,17 +1713,27 @@ func dirSizeCmd(path string) tea.Cmd {
 	}
 }
 
-func copyPlanCmd(kind fileOpKind, sourcePath, targetDir string, overwrite bool) tea.Cmd {
+func copyPlanCmd(kind fileOpKind, sourcePaths []string, targetDir string, overwrite bool, existingTargets int) tea.Cmd {
 	return func() tea.Msg {
-		stats, err := vfs.CopyStats(sourcePath)
+		stats := vfs.TransferStats{}
+		var err error
+		for _, sourcePath := range sourcePaths {
+			part, statErr := vfs.CopyStats(sourcePath)
+			if statErr != nil {
+				err = statErr
+				break
+			}
+			stats.FilesTotal += part.FilesTotal
+			stats.BytesTotal += part.BytesTotal
+		}
 		return copyPlanMsg{
-			kind:       kind,
-			sourcePath: sourcePath,
-			targetDir:  targetDir,
-			targetPath: filepath.Join(targetDir, filepath.Base(sourcePath)),
-			overwrite:  overwrite,
-			stats:      stats,
-			err:        err,
+			kind:            kind,
+			sourcePaths:     append([]string(nil), sourcePaths...),
+			targetDir:       targetDir,
+			overwrite:       overwrite,
+			existingTargets: existingTargets,
+			stats:           stats,
+			err:             err,
 		}
 	}
 }
@@ -1679,23 +1750,21 @@ func dismissNoticeCmd(delay time.Duration) tea.Cmd {
 	})
 }
 
-func (m *Model) startCopyJob(kind fileOpKind, sourcePath, targetDir string, overwrite bool, stats vfs.TransferStats) tea.Cmd {
+func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir string, overwrite bool, stats vfs.TransferStats) tea.Cmd {
 	m.nextCopyJob++
 	jobID := m.nextCopyJob
-	targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
 	m.copyJob = &copyJobState{
-		id:         jobID,
-		kind:       kind,
-		sourcePath: sourcePath,
-		targetDir:  targetDir,
-		targetPath: targetPath,
-		overwrite:  overwrite,
+		id:          jobID,
+		kind:        kind,
+		sourcePaths: append([]string(nil), sourcePaths...),
+		targetDir:   targetDir,
+		overwrite:   overwrite,
 		progress: vfs.CopyProgress{
 			FilesDone:   0,
 			FilesTotal:  stats.FilesTotal,
 			BytesDone:   0,
 			BytesTotal:  stats.BytesTotal,
-			CurrentPath: sourcePath,
+			CurrentPath: sourcePaths[0],
 		},
 	}
 	m.modal = modalState{kind: modalCopyProgress}
@@ -1704,25 +1773,56 @@ func (m *Model) startCopyJob(kind fileOpKind, sourcePath, targetDir string, over
 	return tea.Batch(
 		func() tea.Msg {
 			go func() {
-				var (
-					target string
-					err    error
-				)
-				progressFn := func(progress vfs.CopyProgress) {
-					m.copyProgress <- copyProgressMsg{jobID: jobID, progress: progress}
-				}
-				switch kind {
-				case opMove:
-					target, err = vfs.MovePathWithProgress(sourcePath, targetDir, overwrite, stats, progressFn)
-				default:
-					target, err = vfs.CopyPathWithProgress(sourcePath, targetDir, overwrite, stats, progressFn)
+				doneFiles := 0
+				var doneBytes int64
+				for _, sourcePath := range sourcePaths {
+					entryStats, statErr := vfs.CopyStats(sourcePath)
+					if statErr != nil {
+						m.copyProgress <- copyDoneMsg{
+							jobID:       jobID,
+							kind:        kind,
+							sourcePaths: append([]string(nil), sourcePaths...),
+							targetDir:   targetDir,
+							err:         statErr,
+						}
+						return
+					}
+					progressFn := func(progress vfs.CopyProgress) {
+						m.copyProgress <- copyProgressMsg{
+							jobID: jobID,
+							progress: vfs.CopyProgress{
+								FilesDone:   doneFiles + progress.FilesDone,
+								FilesTotal:  stats.FilesTotal,
+								BytesDone:   doneBytes + progress.BytesDone,
+								BytesTotal:  stats.BytesTotal,
+								CurrentPath: progress.CurrentPath,
+							},
+						}
+					}
+					switch kind {
+					case opMove:
+						_, statErr = vfs.MovePathWithProgress(sourcePath, targetDir, overwrite, entryStats, progressFn)
+					default:
+						_, statErr = vfs.CopyPathWithProgress(sourcePath, targetDir, overwrite, entryStats, progressFn)
+					}
+					if statErr != nil {
+						m.copyProgress <- copyDoneMsg{
+							jobID:       jobID,
+							kind:        kind,
+							sourcePaths: append([]string(nil), sourcePaths...),
+							targetDir:   targetDir,
+							err:         statErr,
+						}
+						return
+					}
+					doneFiles += entryStats.FilesTotal
+					doneBytes += entryStats.BytesTotal
 				}
 				m.copyProgress <- copyDoneMsg{
-					jobID:      jobID,
-					kind:       kind,
-					sourcePath: sourcePath,
-					targetPath: target,
-					err:        err,
+					jobID:       jobID,
+					kind:        kind,
+					sourcePaths: append([]string(nil), sourcePaths...),
+					targetDir:   targetDir,
 				}
 			}()
 			return nil
@@ -1738,10 +1838,14 @@ func moveCmd(sourcePath, targetDir string, overwrite bool) tea.Cmd {
 	}
 }
 
-func deleteCmd(path string) tea.Cmd {
+func deletePathsCmd(paths []string) tea.Cmd {
 	return func() tea.Msg {
-		err := vfs.DeletePath(path)
-		return opMsg{kind: opDelete, sourcePath: path, err: err}
+		for _, path := range paths {
+			if err := vfs.DeletePath(path); err != nil {
+				return opMsg{kind: opDelete, sourcePath: path, err: err}
+			}
+		}
+		return opMsg{kind: opDelete}
 	}
 }
 
@@ -1790,6 +1894,23 @@ func formatCopyStatus(kind fileOpKind, progress vfs.CopyProgress) string {
 		formatSize(progress.BytesDone, true),
 		formatSize(progress.BytesTotal, true),
 	)
+}
+
+func transferSourceLabel(paths []string) string {
+	if len(paths) == 0 {
+		return "n/a"
+	}
+	if len(paths) == 1 {
+		return paths[0]
+	}
+	return fmt.Sprintf("%d selected entries", len(paths))
+}
+
+func pluralSuffix(count int, singular string, plural string) string {
+	if count == 1 {
+		return singular
+	}
+	return plural
 }
 
 func progressTitle(kind fileOpKind) string {

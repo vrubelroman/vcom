@@ -13,6 +13,8 @@ type KeyMap struct {
 	CycleSort    key.Binding
 	Up           key.Binding
 	Down         key.Binding
+	SelectUp     key.Binding
+	SelectDown   key.Binding
 	PageUp       key.Binding
 	PageDown     key.Binding
 	Open         key.Binding
@@ -42,6 +44,8 @@ func DefaultKeyMap() KeyMap {
 		CycleSort:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort")),
 		Up:           key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:         key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		SelectUp:     key.NewBinding(key.WithKeys("shift+up", "K"), key.WithHelp("S-↑/K", "select up")),
+		SelectDown:   key.NewBinding(key.WithKeys("shift+down", "J"), key.WithHelp("S-↓/J", "select down")),
 		PageUp:       key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp/b", "page up")),
 		PageDown:     key.NewBinding(key.WithKeys("pgdown", "f"), key.WithHelp("PgDn/f", "page down")),
 		Open:         key.NewBinding(key.WithKeys("enter", "right"), key.WithHelp("Enter", "open")),
@@ -66,7 +70,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Help, k.Up, k.Down, k.Open, k.Back, k.Switch, k.Info},
+		{k.Help, k.Up, k.Down, k.SelectUp, k.SelectDown, k.Open, k.Back},
 		{k.View, k.Edit, k.Copy, k.Move, k.Mkdir, k.Delete},
 		{k.SelectText, k.DirSize, k.Refresh, k.ToggleHidden, k.CycleSort, k.CycleTheme, k.Quit},
 	}

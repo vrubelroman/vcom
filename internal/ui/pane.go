@@ -24,6 +24,7 @@ type BrowserPane struct {
 	Entries []vfs.Entry
 	Cursor  int
 	Offset  int
+	Marked  map[string]struct{}
 }
 
 func (p *BrowserPane) Selected() (vfs.Entry, bool) {
@@ -35,6 +36,7 @@ func (p *BrowserPane) Selected() (vfs.Entry, bool) {
 
 func (p *BrowserPane) SetEntries(entries []vfs.Entry, preserveKey string) {
 	p.Entries = entries
+	p.PruneMarks()
 	if len(entries) == 0 {
 		p.Cursor = 0
 		p.Offset = 0
@@ -76,6 +78,82 @@ func (p *BrowserPane) Move(delta int, pageSize int) {
 	if p.Offset < 0 {
 		p.Offset = 0
 	}
+}
+
+func (p *BrowserPane) EnsureMarked(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	if p.Marked == nil {
+		p.Marked = map[string]struct{}{}
+	}
+	p.Marked[path] = struct{}{}
+}
+
+func (p *BrowserPane) ToggleMarked(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	if p.Marked == nil {
+		p.Marked = map[string]struct{}{}
+	}
+	if _, ok := p.Marked[path]; ok {
+		delete(p.Marked, path)
+		if len(p.Marked) == 0 {
+			p.Marked = nil
+		}
+		return
+	}
+	p.Marked[path] = struct{}{}
+}
+
+func (p *BrowserPane) IsMarked(path string) bool {
+	if p.Marked == nil {
+		return false
+	}
+	_, ok := p.Marked[path]
+	return ok
+}
+
+func (p *BrowserPane) ClearMarks() {
+	p.Marked = nil
+}
+
+func (p *BrowserPane) PruneMarks() {
+	if len(p.Marked) == 0 {
+		return
+	}
+	valid := map[string]struct{}{}
+	for _, entry := range p.Entries {
+		if entry.IsParent {
+			continue
+		}
+		valid[entry.Path] = struct{}{}
+	}
+	for path := range p.Marked {
+		if _, ok := valid[path]; !ok {
+			delete(p.Marked, path)
+		}
+	}
+	if len(p.Marked) == 0 {
+		p.Marked = nil
+	}
+}
+
+func (p *BrowserPane) MarkedEntries() []vfs.Entry {
+	if len(p.Marked) == 0 {
+		return nil
+	}
+	result := make([]vfs.Entry, 0, len(p.Marked))
+	for _, entry := range p.Entries {
+		if entry.IsParent {
+			continue
+		}
+		if p.IsMarked(entry.Path) {
+			result = append(result, entry)
+		}
+	}
+	return result
 }
 
 func (p *BrowserPane) EnsureVisible(pageSize int) {
@@ -195,7 +273,8 @@ func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, 
 	for idx := pane.Offset; idx < end; idx++ {
 		entry := pane.Entries[idx]
 		isSelected := idx == pane.Cursor && active
-		row := renderEntryRow(entry, cfg, width, isSelected, idx == hoverIndex, active, palette, background)
+		marked := !entry.IsParent && pane.IsMarked(entry.Path)
+		row := renderEntryRow(entry, cfg, width, isSelected, marked, idx == hoverIndex, active, palette, background)
 		lines = append(lines, row)
 	}
 	for len(lines) < visibleHeight {
@@ -208,10 +287,12 @@ func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, 
 		Render(strings.Join(lines, "\n"))
 }
 
-func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool, hovered bool, active bool, palette theme.Palette, baseBackground lipgloss.Color) string {
+func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool, marked bool, hovered bool, active bool, palette theme.Palette, baseBackground lipgloss.Color) string {
 	columns := buildColumns(cfg, width)
 	rowBackground := baseBackground
 	switch {
+	case marked:
+		rowBackground = palette.Danger
 	case selected:
 		rowBackground = palette.Selection
 	case hovered:
@@ -221,12 +302,16 @@ func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool
 	parts := make([]string, 0, len(columns))
 	for idx, column := range columns {
 		value := column.Value(entry, cfg.Browser.HumanReadableSize)
+		foreground := entryColor(entry, palette)
+		if marked {
+			foreground = palette.Background
+		}
 		style := lipgloss.NewStyle().
 			Width(column.Width).
-			Foreground(entryColor(entry, palette)).
+			Foreground(foreground).
 			Background(rowBackground)
 
-		if entry.IsHidden {
+		if entry.IsHidden && !marked {
 			style = style.Foreground(palette.Muted)
 		}
 		if column.AlignRight {
