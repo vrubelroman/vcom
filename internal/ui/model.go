@@ -28,6 +28,7 @@ const (
 	modalConfirm
 	modalCopyProgress
 	modalNotice
+	modalHelp
 )
 
 type fileOpKind int
@@ -353,6 +354,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, m.keys.Help):
+			m.openHelpModal()
+			return m, nil
 		case key.Matches(msg, m.keys.View):
 			return m.handleView()
 		case key.Matches(msg, m.keys.Edit):
@@ -473,7 +477,11 @@ func (m Model) View() string {
 		Foreground(m.palette.Text).
 		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 	if m.modal.kind != modalNone {
-		view = overlayCenter(view, renderModal(m, m.palette, min(72, m.width-8)), m.width)
+		modalWidth := min(72, m.width-8)
+		if m.modal.kind == modalHelp {
+			modalWidth = min(96, m.width-8)
+		}
+		view = overlayCenter(view, renderModal(m, m.palette, modalWidth), m.width)
 	}
 	return view
 }
@@ -482,7 +490,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.modal.kind {
 	case modalMkdir:
 		switch {
-		case key.Matches(msg, m.keys.Cancel):
+		case isModalCloseKey(msg, m.keys):
 			m.modal = modalState{}
 			m.status = "Cancelled"
 			return m, nil
@@ -502,7 +510,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case modalConfirm:
 		switch {
-		case key.Matches(msg, m.keys.Cancel):
+		case isModalCloseKey(msg, m.keys):
 			m.modal = modalState{}
 			m.status = "Cancelled"
 			return m, nil
@@ -527,6 +535,16 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case modalCopyProgress:
+		if isModalCloseKey(msg, m.keys) {
+			if m.copyJob == nil {
+				m.modal = modalState{}
+				return m, nil
+			}
+			m.copyJob.background = true
+			m.modal = modalState{}
+			m.status = "Transfer continues in background"
+			return m, nil
+		}
 		if key.Matches(msg, m.keys.Background) {
 			if m.copyJob == nil {
 				m.modal = modalState{}
@@ -540,13 +558,24 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case modalNotice:
-		if key.Matches(msg, m.keys.Confirm) || key.Matches(msg, m.keys.Cancel) {
+		if key.Matches(msg, m.keys.Confirm) || isModalCloseKey(msg, m.keys) {
 			m.modal = modalState{}
+		}
+		return m, nil
+
+	case modalHelp:
+		if isModalCloseKey(msg, m.keys) || key.Matches(msg, m.keys.Confirm) || key.Matches(msg, m.keys.Help) {
+			m.modal = modalState{}
+			m.status = "Help closed"
 		}
 		return m, nil
 	}
 
 	return m, nil
+}
+
+func isModalCloseKey(msg tea.KeyMsg, keys KeyMap) bool {
+	return key.Matches(msg, keys.Cancel) || msg.String() == "q"
 }
 
 func (m *Model) reloadPane(id PaneID, preserve string) error {
@@ -996,6 +1025,49 @@ func (m *Model) openConfirmModal(title, body, note string, pending pendingOperat
 	}
 }
 
+func (m *Model) openHelpModal() {
+	sections := []string{
+		"Navigation",
+		"  j / Down       move down",
+		"  k / Up         move up",
+		"  PgDn / f       page down",
+		"  PgUp / b       page up",
+		"  Enter / Right  open selected entry",
+		"  Backspace/Left  go to parent directory",
+		"  Tab / h / l    switch active pane",
+		"  r              refresh both panes",
+		"",
+		"View and Panels",
+		"  i              toggle preview/info pane",
+		"  Ctrl+t         toggle text selection mode in text preview",
+		"  Space          calculate selected directory size",
+		"  s              cycle sort mode",
+		"  .              toggle hidden files",
+		"  t              cycle theme",
+		"",
+		"Dialogs and Transfers",
+		"  Enter / y      confirm action",
+		"  Esc / n        cancel action",
+		"  b              run copy/move in background (progress dialog)",
+		"",
+		"Mouse",
+		"  Left click     select entry and activate pane",
+		"  Double click   open selected entry",
+		"  Right click    toggle preview/info mode for clicked entry",
+		"  Wheel          scroll list or preview area",
+		"",
+		"F-key actions are shown in the footer.",
+	}
+
+	m.modal = modalState{
+		kind:  modalHelp,
+		title: "Keyboard and Mouse Help",
+		body:  strings.Join(sections, "\n"),
+		note:  "F1/? or Esc to close",
+	}
+	m.status = "Help opened"
+}
+
 func (m *Model) applyDirSize(path string, size int64) {
 	for _, pane := range []*BrowserPane{&m.left, &m.right} {
 		for idx := range pane.Entries {
@@ -1293,6 +1365,9 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 	if m.modal.kind == modalCopyProgress && m.copyJob != nil {
 		return renderCopyProgressModal(*m.copyJob, palette, width)
 	}
+	if m.modal.kind == modalHelp {
+		return renderHelpModal(m.modal, palette, width)
+	}
 
 	modal := m.modal
 	contentWidth := max(width-4, 1)
@@ -1319,6 +1394,98 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 	}
 
 	return box.Render(strings.Join(lines, "\n"))
+}
+
+func renderHelpModal(modal modalState, palette theme.Palette, width int) string {
+	contentWidth := max(width-4, 1)
+	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
+	lineStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Text)
+	mutedLineStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
+	noteStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.FooterKey).Bold(true)
+	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
+
+	sectionColors := []lipgloss.Color{palette.Accent, palette.Warning, palette.FooterKey, palette.Danger}
+	keyColStyle := lipgloss.NewStyle().Width(24).Background(palette.Panel).Foreground(palette.FooterKey).Bold(true)
+	descColStyle := lipgloss.NewStyle().Background(palette.Panel).Foreground(palette.Text)
+
+	box := lipgloss.NewStyle().
+		Width(width).
+		Padding(1, 2).
+		Background(palette.Panel).
+		Foreground(palette.Text).
+		BorderStyle(lipgloss.DoubleBorder()).
+		BorderForeground(palette.BorderActive)
+
+	lines := []string{titleStyle.Render(modal.title), spacer}
+	sectionIdx := 0
+	for _, raw := range strings.Split(modal.body, "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			lines = append(lines, spacer)
+			continue
+		}
+
+		if strings.HasPrefix(raw, "  ") {
+			keyLabel, action := splitHelpItem(raw)
+			if action == "" {
+				lines = append(lines, lineStyle.Render(trimmed))
+				continue
+			}
+			row := keyColStyle.Render(keyLabel) + descColStyle.Render(action)
+			lines = append(lines, lineStyle.Render(row))
+			continue
+		}
+
+		if strings.HasSuffix(trimmed, ".") {
+			lines = append(lines, mutedLineStyle.Render(trimmed))
+			continue
+		}
+
+		sectionColor := sectionColorForHeader(trimmed, sectionIdx, sectionColors, palette)
+		sectionIdx++
+		header := lipgloss.NewStyle().
+			Width(contentWidth).
+			Background(palette.Panel).
+			Foreground(sectionColor).
+			Bold(true).
+			Render(trimmed)
+		lines = append(lines, header)
+	}
+
+	if modal.note != "" {
+		lines = append(lines, spacer, noteStyle.Render(modal.note))
+	}
+
+	return box.Render(strings.Join(lines, "\n"))
+}
+
+func splitHelpItem(raw string) (string, string) {
+	value := strings.TrimSpace(raw)
+	for idx := 0; idx < len(value)-1; idx++ {
+		if value[idx] == ' ' && value[idx+1] == ' ' {
+			keyLabel := strings.TrimSpace(value[:idx])
+			action := strings.TrimSpace(value[idx:])
+			if keyLabel != "" && action != "" {
+				return keyLabel, action
+			}
+		}
+	}
+	return value, ""
+}
+
+func sectionColorForHeader(header string, idx int, fallback []lipgloss.Color, palette theme.Palette) lipgloss.Color {
+	switch header {
+	case "Navigation":
+		return palette.Folder
+	case "View and Panels":
+		return fallback[1]
+	case "Dialogs and Transfers":
+		return palette.BinaryFile
+	case "Mouse":
+		return fallback[3]
+	default:
+		return fallback[idx%len(fallback)]
+	}
 }
 
 func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int) string {
