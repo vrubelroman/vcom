@@ -93,6 +93,12 @@ type copyProgressMsg struct {
 	progress vfs.CopyProgress
 }
 
+type deletePlanMsg struct {
+	sourcePaths []string
+	stats       vfs.TransferStats
+	err         error
+}
+
 type copyDoneMsg struct {
 	jobID       int
 	kind        fileOpKind
@@ -270,21 +276,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		verb := operationVerb(msg.kind)
 		title := fmt.Sprintf("%s selected entry?", strings.Title(verb))
-		fromLabel := msg.sourcePaths[0]
-		if len(msg.sourcePaths) > 1 {
-			fromLabel = fmt.Sprintf("%d selected entries", len(msg.sourcePaths))
-		}
 		body := strings.Join([]string{
-			fmt.Sprintf("From: %s", fromLabel),
-			fmt.Sprintf("To:   %s", msg.targetDir),
-			"",
+			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
 			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
 			fmt.Sprintf("Size:  %s", formatSize(msg.stats.BytesTotal, true)),
 		}, "\n")
-		if msg.existingTargets > 0 {
-			body += fmt.Sprintf("\n\nExisting targets: %d (will be overwritten)", msg.existingTargets)
-		}
-		note := fmt.Sprintf("Enter/y to start %s, Esc/n to cancel", verb)
+		note := "confirm-actions"
 		m.openConfirmModal(title, body, note, pendingOperation{
 			kind:            msg.kind,
 			sourcePaths:     append([]string(nil), msg.sourcePaths...),
@@ -293,6 +290,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			existingTargets: msg.existingTargets,
 			stats:           msg.stats,
 		})
+		return m, nil
+
+	case deletePlanMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+
+		title := "Delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + "?"
+		bodyLines := []string{
+			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
+			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
+			fmt.Sprintf("Size:  %s", formatSize(msg.stats.BytesTotal, true)),
+		}
+		m.openConfirmModal(
+			title,
+			strings.Join(bodyLines, "\n"),
+			"confirm-actions",
+			pendingOperation{
+				kind:        opDelete,
+				sourcePaths: append([]string(nil), msg.sourcePaths...),
+				stats:       msg.stats,
+			},
+		)
 		return m, nil
 
 	case copyProgressMsg:
@@ -830,20 +852,9 @@ func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 		return m, deletePathsCmd(sources)
 	}
 
-	body := sources[0]
-	if len(sources) > 1 {
-		body = fmt.Sprintf("%d selected entries", len(sources))
-	}
-	m.openConfirmModal(
-		"Delete selected entr"+pluralSuffix(len(sources), "y", "ies")+"?",
-		body,
-		"Enter/y to delete permanently, Esc/n to cancel",
-		pendingOperation{
-			kind:        opDelete,
-			sourcePaths: append([]string(nil), sources...),
-		},
-	)
-	return m, nil
+	m.busy = true
+	m.status = "Calculating delete size"
+	return m, deletePlanCmd(sources)
 }
 
 func (m *Model) handleView() (tea.Model, tea.Cmd) {
@@ -1433,7 +1444,6 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 	modal := m.modal
 	contentWidth := max(width-4, 1)
 	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
-	bodyStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
 	noteStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
 	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
 
@@ -1445,16 +1455,117 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 		BorderStyle(lipgloss.DoubleBorder()).
 		BorderForeground(palette.BorderActive)
 
-	lines := []string{titleStyle.Render(modal.title), spacer, bodyStyle.Render(modal.body)}
+	lines := []string{titleStyle.Render(modal.title), spacer}
+
+	for _, raw := range strings.Split(modal.body, "\n") {
+		lines = append(lines, renderModalBodyLine(raw, contentWidth, palette))
+	}
 
 	if modal.kind == modalMkdir {
 		lines = append(lines, spacer, lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(modal.input.View()))
 	}
 	if modal.note != "" {
-		lines = append(lines, spacer, noteStyle.Render(modal.note))
+		lines = append(lines, spacer)
+		if modal.note == "confirm-actions" {
+			lines = append(lines, renderConfirmActions(contentWidth, palette))
+		} else {
+			for _, raw := range strings.Split(modal.note, "\n") {
+				lines = append(lines, renderModalNoteLine(raw, contentWidth, palette, noteStyle))
+			}
+		}
 	}
 
 	return box.Render(strings.Join(lines, "\n"))
+}
+
+func renderModalBodyLine(raw string, width int, palette theme.Palette) string {
+	base := lipgloss.NewStyle().
+		Width(width).
+		Background(palette.Panel).
+		Foreground(palette.Text)
+	if strings.TrimSpace(raw) == "" {
+		return base.Render("")
+	}
+
+	if idx := strings.Index(raw, ":"); idx > 0 {
+		keyText := strings.TrimSpace(raw[:idx+1])
+		valueText := strings.TrimLeft(raw[idx+1:], " ")
+		keyWidth := min(max(idx+2, 8), width)
+		valueWidth := max(width-keyWidth, 0)
+
+		keyStyle := lipgloss.NewStyle().
+			Width(keyWidth).
+			Background(palette.Panel).
+			Foreground(palette.FooterKey).
+			Bold(true)
+		valueStyle := lipgloss.NewStyle().
+			Width(valueWidth).
+			Background(palette.Panel).
+			Foreground(palette.Text)
+		return base.Render(keyStyle.Render(keyText) + valueStyle.Render(valueText))
+	}
+
+	if strings.HasPrefix(strings.TrimSpace(raw), "Existing targets") {
+		return lipgloss.NewStyle().
+			Width(width).
+			Background(palette.Panel).
+			Foreground(palette.Warning).
+			Render(strings.TrimSpace(raw))
+	}
+
+	return base.Render(raw)
+}
+
+func renderModalNoteLine(raw string, width int, palette theme.Palette, fallback lipgloss.Style) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fallback.Render("")
+	}
+
+	for _, sep := range []string{" to ", " (", ","} {
+		if idx := strings.Index(raw, sep); idx > 0 {
+			keyLabel := strings.TrimSpace(raw[:idx])
+			action := strings.TrimLeft(raw[idx:], " ")
+			keyWidth := min(max(lipgloss.Width(keyLabel)+2, 10), width)
+			actionWidth := max(width-keyWidth, 0)
+			keyStyle := lipgloss.NewStyle().
+				Width(keyWidth).
+				Background(palette.Panel).
+				Foreground(palette.FooterKey).
+				Bold(true)
+			actionStyle := lipgloss.NewStyle().
+				Width(actionWidth).
+				Background(palette.Panel).
+				Foreground(palette.Muted)
+			return keyStyle.Render(keyLabel) + actionStyle.Render(action)
+		}
+	}
+
+	return fallback.Render(raw)
+}
+
+func renderConfirmActions(width int, palette theme.Palette) string {
+	buttonWidth := max((width-2)/2, 10)
+	confirm := lipgloss.NewStyle().
+		Width(buttonWidth).
+		Align(lipgloss.Center).
+		Background(palette.TextFile).
+		Foreground(palette.Background).
+		Bold(true).
+		Render("Enter / y")
+	cancel := lipgloss.NewStyle().
+		Width(buttonWidth).
+		Align(lipgloss.Center).
+		Background(palette.Danger).
+		Foreground(palette.Background).
+		Bold(true).
+		Render("Esc / n")
+
+	row := lipgloss.JoinHorizontal(lipgloss.Top, confirm, "  ", cancel)
+	return lipgloss.NewStyle().
+		Width(width).
+		Background(palette.Panel).
+		Render(row)
 }
 
 func renderHelpModal(modal modalState, palette theme.Palette, width int) string {
@@ -1734,6 +1845,27 @@ func copyPlanCmd(kind fileOpKind, sourcePaths []string, targetDir string, overwr
 			existingTargets: existingTargets,
 			stats:           stats,
 			err:             err,
+		}
+	}
+}
+
+func deletePlanCmd(sourcePaths []string) tea.Cmd {
+	return func() tea.Msg {
+		stats := vfs.TransferStats{}
+		var err error
+		for _, sourcePath := range sourcePaths {
+			part, statErr := vfs.CopyStats(sourcePath)
+			if statErr != nil {
+				err = statErr
+				break
+			}
+			stats.FilesTotal += part.FilesTotal
+			stats.BytesTotal += part.BytesTotal
+		}
+		return deletePlanMsg{
+			sourcePaths: append([]string(nil), sourcePaths...),
+			stats:       stats,
+			err:         err,
 		}
 	}
 }
