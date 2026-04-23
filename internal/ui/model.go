@@ -1588,19 +1588,11 @@ func overlayCenter(base string, overlay string, width int) string {
 func renderPreviewContent(viewportModel *viewport.Model, palette theme.Palette, width int, height int) string {
 	outerWidth := max(width-2, 1)
 	innerWidth := max(outerWidth-2, 1)
-	innerHeight := max(height-1, 1)
-
-	header := lipgloss.NewStyle().
-		Width(innerWidth).
-		Padding(0, 1).
-		Background(palette.PanelInactive).
-		Foreground(palette.FooterKey).
-		Bold(true).
-		Render("CONTENT")
+	innerHeight := max(height, 1)
 
 	body := lipgloss.NewStyle().
 		Width(innerWidth).
-		Height(max(innerHeight-lipgloss.Height(header), 1)).
+		Height(max(innerHeight, 1)).
 		Padding(0, 1).
 		Background(palette.Panel).
 		Render(viewportModel.View())
@@ -1613,7 +1605,7 @@ func renderPreviewContent(viewportModel *viewport.Model, palette theme.Palette, 
 		BorderTop(true).
 		BorderForeground(palette.Border).
 		BorderBackground(palette.Panel).
-		Render(lipgloss.JoinVertical(lipgloss.Left, header, body))
+		Render(body)
 }
 
 func previewIcon(preview vfs.Preview) string {

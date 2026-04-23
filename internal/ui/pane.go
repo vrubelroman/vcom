@@ -137,32 +137,20 @@ func renderPane(
 }
 
 func renderPaneHeader(pane BrowserPane, cfg config.Config, palette theme.Palette, width int, active bool, headerBg lipgloss.Color) string {
-	label := strings.ToUpper(string(pane.ID))
-	labelStyle := lipgloss.NewStyle().
-		Foreground(palette.Background).
-		Background(palette.FooterKey).
-		Bold(true).
-		Padding(0, 1)
-	if active {
-		labelStyle = labelStyle.Background(palette.Accent)
-	}
-
-	labelView := labelStyle.Render(label)
-	pathWidth := max(width-lipgloss.Width(labelView)-1, 4)
-	spacer := lipgloss.NewStyle().
-		Width(1).
-		Background(headerBg).
-		Render(" ")
+	pathWidth := max(width, 4)
 	pathStyle := lipgloss.NewStyle().
 		Width(pathWidth).
 		Background(headerBg).
 		Foreground(palette.Text).
 		Bold(active)
+	if active {
+		pathStyle = pathStyle.Foreground(palette.TextFile)
+	}
 
 	return lipgloss.NewStyle().
 		Width(width).
 		Background(headerBg).
-		Render(labelView + spacer + pathStyle.Render(truncateMiddle(compactPath(pane.Path, cfg.UI.PathDisplay), pathWidth)))
+		Render(pathStyle.Render(truncateMiddle(compactPath(pane.Path, cfg.UI.PathDisplay), pathWidth)))
 }
 
 func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, background lipgloss.Color) string {
