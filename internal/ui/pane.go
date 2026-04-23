@@ -206,7 +206,8 @@ func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, 
 	lines := make([]string, 0, visibleHeight)
 	for idx := pane.Offset; idx < end; idx++ {
 		entry := pane.Entries[idx]
-		row := renderEntryRow(entry, cfg, width, idx == pane.Cursor, idx == hoverIndex, active, palette, background)
+		isSelected := idx == pane.Cursor && active
+		row := renderEntryRow(entry, cfg, width, isSelected, idx == hoverIndex, active, palette, background)
 		lines = append(lines, row)
 	}
 	for len(lines) < visibleHeight {

@@ -461,9 +461,6 @@ func (m Model) View() string {
 	}
 
 	parts := make([]string, 0, 3)
-	if m.cfg.UI.ShowTitleBar {
-		parts = append(parts, renderTitleBar(m))
-	}
 	parts = append(parts, panels)
 	if m.cfg.UI.ShowFooter {
 		parts = append(parts, renderFooter(m))
@@ -1065,9 +1062,6 @@ func (m *Model) layoutWidths() (int, int, int) {
 
 func (m *Model) bodyHeight() int {
 	height := m.height
-	if m.cfg.UI.ShowTitleBar {
-		height--
-	}
 	if m.cfg.UI.ShowFooter {
 		height--
 	}
@@ -1776,9 +1770,6 @@ func (m *Model) mouseTarget(x, y int) (PaneID, int, bool) {
 
 	leftWidth, previewWidth, rightWidth := m.layoutWidths()
 	top := 0
-	if m.cfg.UI.ShowTitleBar {
-		top++
-	}
 	bodyHeight := m.bodyHeight()
 	if y < top || y >= top+bodyHeight {
 		return "", 0, false
@@ -1854,9 +1845,6 @@ func (m *Model) mouseOverPreview(x, y int) bool {
 
 	leftWidth, previewWidth, _ := m.layoutWidths()
 	top := 0
-	if m.cfg.UI.ShowTitleBar {
-		top++
-	}
 	bodyHeight := m.bodyHeight()
 	if y < top || y >= top+bodyHeight {
 		return false
