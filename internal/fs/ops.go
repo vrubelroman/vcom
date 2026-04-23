@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ type CopyProgress struct {
 }
 
 type copyProgressState struct {
+	ctx       context.Context
 	filesDone int
 	bytesDone int64
 	stats     TransferStats
@@ -34,6 +36,87 @@ type copyProgressState struct {
 
 func CopyPath(srcPath string, dstDir string, overwrite bool) (string, error) {
 	return CopyPathWithProgress(srcPath, dstDir, overwrite, TransferStats{}, nil)
+}
+
+func CopyPathWithProgressContext(ctx context.Context, srcPath string, dstDir string, overwrite bool, stats TransferStats, progress func(CopyProgress)) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	srcInfo, err := os.Lstat(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", srcPath, err)
+	}
+
+	targetPath := filepath.Join(dstDir, filepath.Base(srcPath))
+	if same, err := samePath(srcPath, targetPath); err != nil {
+		return "", err
+	} else if same {
+		return "", fmt.Errorf("source and target are the same: %s", targetPath)
+	}
+
+	if exists, err := PathExists(targetPath); err != nil {
+		return "", err
+	} else if exists {
+		if !overwrite {
+			return "", ErrOverwrite(targetPath)
+		}
+		if err := os.RemoveAll(targetPath); err != nil {
+			return "", err
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if progress == nil {
+		progress = func(CopyProgress) {}
+	}
+	if stats.FilesTotal == 0 && stats.BytesTotal == 0 {
+		resolved, err := CopyStats(srcPath)
+		if err != nil {
+			return "", err
+		}
+		stats = resolved
+	}
+	tracker := copyProgressState{ctx: ctx, stats: stats, callback: progress}
+	tracker.emit(srcPath, true)
+
+	cleanupOnErr := func(copyErr error) (string, error) {
+		if copyErr != nil {
+			_ = os.RemoveAll(targetPath)
+		}
+		return "", copyErr
+	}
+
+	if srcInfo.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(srcPath)
+		if err != nil {
+			return "", err
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if err := os.Symlink(target, targetPath); err != nil {
+			return "", err
+		}
+		tracker.finishFile(srcPath)
+		return targetPath, nil
+	}
+
+	if srcInfo.IsDir() {
+		if err := copyDir(srcPath, targetPath, &tracker); err != nil {
+			return cleanupOnErr(err)
+		}
+		tracker.emit(srcPath, true)
+		return targetPath, nil
+	}
+
+	if err := copyFile(srcPath, targetPath, srcInfo.Mode(), &tracker); err != nil {
+		return cleanupOnErr(err)
+	}
+	tracker.emit(srcPath, true)
+	return targetPath, nil
 }
 
 func CopyStats(srcPath string) (TransferStats, error) {
@@ -77,67 +160,7 @@ func CopyStats(srcPath string) (TransferStats, error) {
 }
 
 func CopyPathWithProgress(srcPath string, dstDir string, overwrite bool, stats TransferStats, progress func(CopyProgress)) (string, error) {
-	srcInfo, err := os.Lstat(srcPath)
-	if err != nil {
-		return "", fmt.Errorf("stat %s: %w", srcPath, err)
-	}
-
-	targetPath := filepath.Join(dstDir, filepath.Base(srcPath))
-	if same, err := samePath(srcPath, targetPath); err != nil {
-		return "", err
-	} else if same {
-		return "", fmt.Errorf("source and target are the same: %s", targetPath)
-	}
-
-	if exists, err := PathExists(targetPath); err != nil {
-		return "", err
-	} else if exists {
-		if !overwrite {
-			return "", ErrOverwrite(targetPath)
-		}
-		if err := os.RemoveAll(targetPath); err != nil {
-			return "", err
-		}
-	}
-
-	if progress == nil {
-		progress = func(CopyProgress) {}
-	}
-	if stats.FilesTotal == 0 && stats.BytesTotal == 0 {
-		resolved, err := CopyStats(srcPath)
-		if err != nil {
-			return "", err
-		}
-		stats = resolved
-	}
-	tracker := copyProgressState{stats: stats, callback: progress}
-	tracker.emit(srcPath, true)
-
-	if srcInfo.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(srcPath)
-		if err != nil {
-			return "", err
-		}
-		if err := os.Symlink(target, targetPath); err != nil {
-			return "", err
-		}
-		tracker.finishFile(srcPath)
-		return targetPath, nil
-	}
-
-	if srcInfo.IsDir() {
-		if err := copyDir(srcPath, targetPath, &tracker); err != nil {
-			return "", err
-		}
-		tracker.emit(srcPath, true)
-		return targetPath, nil
-	}
-
-	if err := copyFile(srcPath, targetPath, srcInfo.Mode(), &tracker); err != nil {
-		return "", err
-	}
-	tracker.emit(srcPath, true)
-	return targetPath, nil
+	return CopyPathWithProgressContext(context.Background(), srcPath, dstDir, overwrite, stats, progress)
 }
 
 func MovePath(srcPath string, dstDir string, overwrite bool) (string, error) {
@@ -145,6 +168,14 @@ func MovePath(srcPath string, dstDir string, overwrite bool) (string, error) {
 }
 
 func MovePathWithProgress(srcPath string, dstDir string, overwrite bool, stats TransferStats, progress func(CopyProgress)) (string, error) {
+	return MovePathWithProgressContext(context.Background(), srcPath, dstDir, overwrite, stats, progress)
+}
+
+func MovePathWithProgressContext(ctx context.Context, srcPath string, dstDir string, overwrite bool, stats TransferStats, progress func(CopyProgress)) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	targetPath := filepath.Join(dstDir, filepath.Base(srcPath))
 	if same, err := samePath(srcPath, targetPath); err != nil {
 		return "", err
@@ -165,6 +196,9 @@ func MovePathWithProgress(srcPath string, dstDir string, overwrite bool, stats T
 
 	if progress == nil {
 		progress = func(CopyProgress) {}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	if stats.FilesTotal == 0 && stats.BytesTotal == 0 {
 		resolved, err := CopyStats(srcPath)
@@ -187,8 +221,12 @@ func MovePathWithProgress(srcPath string, dstDir string, overwrite bool, stats T
 		return "", err
 	}
 
-	targetPath, err := CopyPathWithProgress(srcPath, dstDir, overwrite, stats, progress)
+	targetPath, err := CopyPathWithProgressContext(ctx, srcPath, dstDir, overwrite, stats, progress)
 	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(targetPath)
 		return "", err
 	}
 	if err := DeletePath(srcPath); err != nil {
@@ -220,6 +258,11 @@ func MakeDir(parent string, name string) (string, error) {
 }
 
 func copyDir(srcDir string, dstDir string, tracker *copyProgressState) error {
+	if tracker != nil && tracker.ctx != nil {
+		if err := tracker.ctx.Err(); err != nil {
+			return err
+		}
+	}
 	info, err := os.Lstat(srcDir)
 	if err != nil {
 		return err
@@ -234,6 +277,11 @@ func copyDir(srcDir string, dstDir string, tracker *copyProgressState) error {
 	}
 
 	for _, entry := range entries {
+		if tracker != nil && tracker.ctx != nil {
+			if err := tracker.ctx.Err(); err != nil {
+				return err
+			}
+		}
 		srcPath := filepath.Join(srcDir, entry.Name())
 		dstPath := filepath.Join(dstDir, entry.Name())
 
@@ -269,6 +317,11 @@ func copyDir(srcDir string, dstDir string, tracker *copyProgressState) error {
 }
 
 func copyFile(srcPath string, dstPath string, mode os.FileMode, tracker *copyProgressState) error {
+	if tracker != nil && tracker.ctx != nil {
+		if err := tracker.ctx.Err(); err != nil {
+			return err
+		}
+	}
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
 		return err
@@ -286,6 +339,8 @@ func copyFile(srcPath string, dstPath string, mode os.FileMode, tracker *copyPro
 		writer = &progressWriter{base: dstFile, tracker: tracker, path: srcPath}
 	}
 	if _, err := io.Copy(writer, srcFile); err != nil {
+		_ = dstFile.Close()
+		_ = os.Remove(dstPath)
 		return err
 	}
 	if tracker != nil {
@@ -301,6 +356,11 @@ type progressWriter struct {
 }
 
 func (w *progressWriter) Write(data []byte) (int, error) {
+	if w.tracker != nil && w.tracker.ctx != nil {
+		if err := w.tracker.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
 	n, err := w.base.Write(data)
 	if n > 0 {
 		w.tracker.addBytes(int64(n), w.path)

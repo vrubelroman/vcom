@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -117,6 +118,8 @@ type copyJobState struct {
 	progress    vfs.CopyProgress
 	overwrite   bool
 	background  bool
+	cancel      context.CancelFunc
+	startedAt   time.Time
 }
 
 type mouseClickState struct {
@@ -334,7 +337,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.busy = false
 		if msg.err != nil {
-			m.status = fmt.Sprintf("%s failed: %v", strings.Title(operationVerb(msg.kind)), msg.err)
+			if msg.err == context.Canceled {
+				m.status = strings.Title(operationVerb(msg.kind)) + " cancelled"
+			} else {
+				m.status = fmt.Sprintf("%s failed: %v", strings.Title(operationVerb(msg.kind)), msg.err)
+			}
 			m.copyJob = nil
 			if m.modal.kind == modalCopyProgress {
 				m.modal = modalState{}
@@ -584,7 +591,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case modalCopyProgress:
-		if isModalCloseKey(msg, m.keys) {
+		if key.Matches(msg, m.keys.Background) {
 			if m.copyJob == nil {
 				m.modal = modalState{}
 				return m, nil
@@ -594,14 +601,15 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "Transfer continues in background"
 			return m, nil
 		}
-		if key.Matches(msg, m.keys.Background) {
+		if key.Matches(msg, m.keys.ProgressCancel) {
 			if m.copyJob == nil {
 				m.modal = modalState{}
 				return m, nil
 			}
-			m.copyJob.background = true
-			m.modal = modalState{}
-			m.status = "Transfer continues in background"
+			if m.copyJob.cancel != nil {
+				m.copyJob.cancel()
+			}
+			m.status = strings.Title(operationVerb(m.copyJob.kind)) + " cancelling..."
 			return m, nil
 		}
 		return m, nil
@@ -1120,6 +1128,7 @@ func (m *Model) openHelpModal() {
 		"  Enter / y      confirm action",
 		"  Esc / n        cancel action",
 		"  b              run copy/move in background (progress dialog)",
+		"  c              cancel active copy/move transfer",
 		"  F5/F6/F8       apply to marked entries when selection exists",
 		"",
 		"Mouse",
@@ -1711,19 +1720,19 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 
 	lines := []string{
 		titleStyle.Render(progressTitle(job.kind)),
-		lineStyle.Render(fmt.Sprintf("From: %s", transferSourceLabel(job.sourcePaths))),
-		lineStyle.Render(fmt.Sprintf("To:   %s", job.targetDir)),
 		spacer,
 		lineStyle.Render(renderProgressBar(ratio, max(contentWidth-8, 10), palette)),
-		lineStyle.Render(fmt.Sprintf("Files: %d / %d", progress.FilesDone, progress.FilesTotal)),
-		lineStyle.Render(fmt.Sprintf("Size:  %s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true))),
+		spacer,
+		renderProgressPercentLine(ratio, contentWidth, palette),
+		renderProgressStatLine("Files:", fmt.Sprintf("%d / %d", progress.FilesDone, progress.FilesTotal), contentWidth, palette),
+		renderProgressStatLine("Size:", fmt.Sprintf("%s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true)), contentWidth, palette),
+		renderProgressStatLine("Speed:", transferSpeed(progress.BytesDone, job.startedAt), contentWidth, palette),
+		spacer,
+		renderProgressActions(contentWidth, palette),
 	}
-
-	if strings.TrimSpace(progress.CurrentPath) != "" {
-		lines = append(lines, lineStyle.Render("Current: "+truncateMiddle(progress.CurrentPath, max(contentWidth-10, 16))))
+	if job.background {
+		lines = append(lines, mutedStyle.Render("Transfer continues in background"))
 	}
-	lines = append(lines, spacer)
-	lines = append(lines, mutedStyle.Render("Press b to continue in background"))
 
 	return box.Render(strings.Join(lines, "\n"))
 }
@@ -1748,8 +1757,97 @@ func renderProgressBar(ratio float64, width int, palette theme.Palette) string {
 
 	bar := lipgloss.NewStyle().Foreground(palette.ProgressFill).Render(strings.Repeat("█", filled))
 	rest := lipgloss.NewStyle().Foreground(palette.ProgressEmpty).Render(strings.Repeat("░", width-filled))
-	percent := fmt.Sprintf(" %3.0f%%", ratio*100)
-	return bar + rest + percent
+	return bar + rest
+}
+
+func renderProgressStatLine(label string, value string, width int, palette theme.Palette) string {
+	keyWidth := min(max(lipgloss.Width(label)+1, 8), width)
+	valueWidth := max(width-keyWidth, 0)
+	keyStyle := lipgloss.NewStyle().
+		Width(keyWidth).
+		Background(palette.Panel).
+		Foreground(palette.FooterKey).
+		Bold(true)
+	valueStyle := lipgloss.NewStyle().
+		Width(valueWidth).
+		Background(palette.Panel).
+		Foreground(palette.Text)
+	return keyStyle.Render(label) + valueStyle.Render(value)
+}
+
+func renderProgressActions(width int, palette theme.Palette) string {
+	const minButtonWidth = 14
+	const maxButtonWidth = 18
+	const gapWidth = 4
+	labelWidth := max(lipgloss.Width("Background / b"), lipgloss.Width("Cancel / c"))
+	buttonWidth := min(max(labelWidth+2, minButtonWidth), maxButtonWidth)
+	buttonWidth = min(buttonWidth, max((width-gapWidth)/2, labelWidth))
+
+	backgroundBtn := lipgloss.NewStyle().
+		Width(buttonWidth).
+		Align(lipgloss.Center).
+		Background(palette.Info).
+		Foreground(palette.Background).
+		Bold(true).
+		Render("Background / b")
+	cancelBtn := lipgloss.NewStyle().
+		Width(buttonWidth).
+		Align(lipgloss.Center).
+		Background(palette.CancelButton).
+		Foreground(palette.Background).
+		Bold(true).
+		Render("Cancel / c")
+
+	gap := lipgloss.NewStyle().
+		Width(gapWidth).
+		Background(palette.Panel).
+		Render("")
+	backgroundBias := lipgloss.NewStyle().
+		Width(10).
+		Background(palette.Panel).
+		Render("")
+	cancelBias := lipgloss.NewStyle().
+		Width(4).
+		Background(palette.Panel).
+		Render("")
+	group := lipgloss.JoinHorizontal(lipgloss.Top, backgroundBtn, backgroundBias, gap, cancelBtn, cancelBias)
+	row := lipgloss.PlaceHorizontal(
+		width,
+		lipgloss.Center,
+		group,
+		lipgloss.WithWhitespaceBackground(palette.Panel),
+	)
+	return lipgloss.NewStyle().
+		Width(width).
+		Background(palette.Panel).
+		Render(row)
+}
+
+func renderProgressPercentLine(ratio float64, width int, palette theme.Palette) string {
+	percent := lipgloss.NewStyle().
+		Foreground(palette.Info).
+		Bold(true).
+		Render(fmt.Sprintf("%3.0f%%", ratio*100))
+	return lipgloss.NewStyle().
+		Width(width).
+		Background(palette.Panel).
+		Align(lipgloss.Right).
+		Render(percent)
+}
+
+func transferSpeed(bytesDone int64, startedAt time.Time) string {
+	if startedAt.IsZero() || bytesDone <= 0 {
+		return "calculating..."
+	}
+	elapsed := time.Since(startedAt)
+	if elapsed <= 0 {
+		return "calculating..."
+	}
+	perSecond := int64(float64(bytesDone) / elapsed.Seconds())
+	if perSecond <= 0 {
+		return "calculating..."
+	}
+	return fmt.Sprintf("%s/s", vfs.HumanSize(perSecond))
 }
 
 func overlayCenter(base string, overlay string, width int) string {
@@ -1913,6 +2011,7 @@ func dismissNoticeCmd(delay time.Duration) tea.Cmd {
 func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir string, overwrite bool, stats vfs.TransferStats) tea.Cmd {
 	m.nextCopyJob++
 	jobID := m.nextCopyJob
+	ctx, cancel := context.WithCancel(context.Background())
 	m.copyJob = &copyJobState{
 		id:          jobID,
 		kind:        kind,
@@ -1926,6 +2025,8 @@ func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir st
 			BytesTotal:  stats.BytesTotal,
 			CurrentPath: sourcePaths[0],
 		},
+		cancel:    cancel,
+		startedAt: time.Now(),
 	}
 	m.modal = modalState{kind: modalCopyProgress}
 	m.status = strings.Title(operationVerb(kind)) + " started"
@@ -1961,9 +2062,9 @@ func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir st
 					}
 					switch kind {
 					case opMove:
-						_, statErr = vfs.MovePathWithProgress(sourcePath, targetDir, overwrite, entryStats, progressFn)
+						_, statErr = vfs.MovePathWithProgressContext(ctx, sourcePath, targetDir, overwrite, entryStats, progressFn)
 					default:
-						_, statErr = vfs.CopyPathWithProgress(sourcePath, targetDir, overwrite, entryStats, progressFn)
+						_, statErr = vfs.CopyPathWithProgressContext(ctx, sourcePath, targetDir, overwrite, entryStats, progressFn)
 					}
 					if statErr != nil {
 						m.copyProgress <- copyDoneMsg{
