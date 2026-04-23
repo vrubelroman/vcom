@@ -1442,18 +1442,20 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 	}
 
 	modal := m.modal
-	contentWidth := max(width-4, 1)
+	outerWidth := max(width, 8)
+	contentWidth := max(outerWidth-6, 1)
 	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
 	noteStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
 	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
 
 	box := lipgloss.NewStyle().
-		Width(width).
+		Width(contentWidth).
 		Padding(1, 2).
 		Background(palette.Panel).
 		Foreground(palette.Text).
 		BorderStyle(lipgloss.DoubleBorder()).
-		BorderForeground(palette.BorderActive)
+		BorderForeground(palette.BorderActive).
+		BorderBackground(palette.Panel)
 
 	lines := []string{titleStyle.Render(modal.title), spacer}
 
@@ -1545,7 +1547,13 @@ func renderModalNoteLine(raw string, width int, palette theme.Palette, fallback 
 }
 
 func renderConfirmActions(width int, palette theme.Palette) string {
-	buttonWidth := max((width-2)/2, 10)
+	const minButtonWidth = 10
+	const maxButtonWidth = 14
+	const gapWidth = 4
+	labelWidth := max(lipgloss.Width("Enter / y"), lipgloss.Width("Esc / n"))
+	buttonWidth := min(max(labelWidth+2, minButtonWidth), maxButtonWidth)
+	buttonWidth = min(buttonWidth, max((width-gapWidth)/2, labelWidth))
+
 	confirm := lipgloss.NewStyle().
 		Width(buttonWidth).
 		Align(lipgloss.Center).
@@ -1553,6 +1561,7 @@ func renderConfirmActions(width int, palette theme.Palette) string {
 		Foreground(palette.Background).
 		Bold(true).
 		Render("Enter / y")
+
 	cancel := lipgloss.NewStyle().
 		Width(buttonWidth).
 		Align(lipgloss.Center).
@@ -1561,7 +1570,25 @@ func renderConfirmActions(width int, palette theme.Palette) string {
 		Bold(true).
 		Render("Esc / n")
 
-	row := lipgloss.JoinHorizontal(lipgloss.Top, confirm, "  ", cancel)
+	gap := lipgloss.NewStyle().
+		Width(gapWidth).
+		Background(palette.Panel).
+		Render("")
+	enterBias := lipgloss.NewStyle().
+		Width(9).
+		Background(palette.Panel).
+		Render("")
+	cancelTail := lipgloss.NewStyle().
+		Width(5).
+		Background(palette.Panel).
+		Render("")
+	group := lipgloss.JoinHorizontal(lipgloss.Top, confirm, enterBias, gap, cancel, cancelTail)
+	row := lipgloss.PlaceHorizontal(
+		width,
+		lipgloss.Center,
+		group,
+		lipgloss.WithWhitespaceBackground(palette.Panel),
+	)
 	return lipgloss.NewStyle().
 		Width(width).
 		Background(palette.Panel).
@@ -1569,7 +1596,8 @@ func renderConfirmActions(width int, palette theme.Palette) string {
 }
 
 func renderHelpModal(modal modalState, palette theme.Palette, width int) string {
-	contentWidth := max(width-4, 1)
+	outerWidth := max(width, 8)
+	contentWidth := max(outerWidth-6, 1)
 	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
 	lineStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Text)
 	mutedLineStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
@@ -1581,12 +1609,13 @@ func renderHelpModal(modal modalState, palette theme.Palette, width int) string 
 	descColStyle := lipgloss.NewStyle().Background(palette.Panel).Foreground(palette.Text)
 
 	box := lipgloss.NewStyle().
-		Width(width).
+		Width(contentWidth).
 		Padding(1, 2).
 		Background(palette.Panel).
 		Foreground(palette.Text).
 		BorderStyle(lipgloss.DoubleBorder()).
-		BorderForeground(palette.BorderActive)
+		BorderForeground(palette.BorderActive).
+		BorderBackground(palette.Panel)
 
 	lines := []string{titleStyle.Render(modal.title), spacer}
 	sectionIdx := 0
@@ -1661,19 +1690,21 @@ func sectionColorForHeader(header string, idx int, fallback []lipgloss.Color, pa
 }
 
 func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int) string {
-	contentWidth := max(width-4, 1)
+	outerWidth := max(width, 8)
+	contentWidth := max(outerWidth-6, 1)
 	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
 	lineStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Text)
 	mutedStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
 	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
 
 	box := lipgloss.NewStyle().
-		Width(width).
+		Width(contentWidth).
 		Padding(1, 2).
 		Background(palette.Panel).
 		Foreground(palette.Text).
 		BorderStyle(lipgloss.DoubleBorder()).
-		BorderForeground(palette.BorderActive)
+		BorderForeground(palette.BorderActive).
+		BorderBackground(palette.Panel)
 
 	progress := job.progress
 	ratio := 0.0
@@ -1686,13 +1717,13 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 		lineStyle.Render(fmt.Sprintf("From: %s", transferSourceLabel(job.sourcePaths))),
 		lineStyle.Render(fmt.Sprintf("To:   %s", job.targetDir)),
 		spacer,
-		lineStyle.Render(renderProgressBar(ratio, max(width-8, 10), palette)),
+		lineStyle.Render(renderProgressBar(ratio, max(contentWidth-8, 10), palette)),
 		lineStyle.Render(fmt.Sprintf("Files: %d / %d", progress.FilesDone, progress.FilesTotal)),
 		lineStyle.Render(fmt.Sprintf("Size:  %s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true))),
 	}
 
 	if strings.TrimSpace(progress.CurrentPath) != "" {
-		lines = append(lines, lineStyle.Render("Current: "+truncateMiddle(progress.CurrentPath, max(width-18, 16))))
+		lines = append(lines, lineStyle.Render("Current: "+truncateMiddle(progress.CurrentPath, max(contentWidth-10, 16))))
 	}
 	lines = append(lines, spacer)
 	lines = append(lines, mutedStyle.Render("Press b to continue in background"))
