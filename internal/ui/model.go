@@ -1802,12 +1802,12 @@ func renderProgressStatLine(label string, value string, width int, palette theme
 }
 
 func renderProgressActions(width int, palette theme.Palette) string {
-	const minButtonWidth = 14
-	const maxButtonWidth = 18
+	const minButtonWidth = 10
+	const maxButtonWidth = 14
+	const gapWidth = 4
 	labelWidth := max(lipgloss.Width("Background / b"), lipgloss.Width("Cancel / c"))
 	buttonWidth := min(max(labelWidth+2, minButtonWidth), maxButtonWidth)
-	edgePad := max(width/8, 6)
-	buttonWidth = min(buttonWidth, max((width-(edgePad*2)-4)/2, labelWidth))
+	buttonWidth = min(buttonWidth, max((width-gapWidth)/2, labelWidth))
 
 	backgroundBtn := lipgloss.NewStyle().
 		Width(buttonWidth).
@@ -1816,6 +1816,7 @@ func renderProgressActions(width int, palette theme.Palette) string {
 		Foreground(palette.Background).
 		Bold(true).
 		Render("Background / b")
+
 	cancelBtn := lipgloss.NewStyle().
 		Width(buttonWidth).
 		Align(lipgloss.Center).
@@ -1824,21 +1825,25 @@ func renderProgressActions(width int, palette theme.Palette) string {
 		Bold(true).
 		Render("Cancel / c")
 
-	leftPad := lipgloss.NewStyle().
-		Width(edgePad).
+	gap := lipgloss.NewStyle().
+		Width(gapWidth).
 		Background(palette.Panel).
 		Render("")
-	rightPadWidth := edgePad
-	centerGapWidth := max(width-edgePad-rightPadWidth-(buttonWidth*2), 0)
-	centerGap := lipgloss.NewStyle().
-		Width(centerGapWidth).
+	enterBias := lipgloss.NewStyle().
+		Width(9).
 		Background(palette.Panel).
 		Render("")
-	rightPad := lipgloss.NewStyle().
-		Width(rightPadWidth).
+	cancelTail := lipgloss.NewStyle().
+		Width(5).
 		Background(palette.Panel).
 		Render("")
-	row := leftPad + backgroundBtn + centerGap + cancelBtn + rightPad
+	group := lipgloss.JoinHorizontal(lipgloss.Top, backgroundBtn, enterBias, gap, cancelBtn, cancelTail)
+	row := lipgloss.PlaceHorizontal(
+		width,
+		lipgloss.Center,
+		group,
+		lipgloss.WithWhitespaceBackground(palette.Panel),
+	)
 	return lipgloss.NewStyle().
 		Width(width).
 		Background(palette.Panel).
