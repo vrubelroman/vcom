@@ -1,6 +1,6 @@
 # vcom
 
-`vcom` is a terminal file manager inspired by Midnight Commander and built with Charm's TUI stack.
+`vcom` is a two-pane terminal file manager with a fast built-in info/preview panel for the active selection.
 
 ## Why vcom
 
@@ -9,55 +9,16 @@
 - Asynchronous copy/move with progress and background mode
 - Theme support and configurable layout/columns
 
-## Interface
-
-`vcom` has two browser panes:
-
-- active pane: navigation and file operations
-- passive pane: target pane for copy/move operations
-
-The preview/info mode (`F9` / `i`) temporarily replaces the inactive pane and shows:
+Preview mode (`F9` / `i`) temporarily replaces the inactive pane and shows:
 
 - directory listing preview
 - text file preview with syntax highlighting
 - image metadata (format + dimensions)
 - safe fallback for binary files
 
-## Features
+## Screenshot
 
-- Two-pane file browser
-- Preview/info pane with metadata block
-- Read-only view mode (`F3` / `v`)
-- External editor support (`F4` / `e`)
-- Rename (`F2` / `r`)
-- Copy (`F5` / `c`), move (`F6` / `m`), mkdir (`F7` / `n`), delete (`F8` / `x`)
-- Multi-selection and batch operations
-- Copy/move progress modal with background mode
-- Directory size calculation (`Space`)
-- Sorting cycle (`s`) and hidden files toggle (`.`)
-- Runtime theme cycle (`t`)
-
-## Default keys
-
-- `Tab` / `h` / `l`: switch active pane
-- `j` / `Down`: move down
-- `k` / `Up`: move up
-- `Shift+Down` / `J`: extend selection down
-- `Shift+Up` / `K`: extend selection up
-- `Enter` / `Right`: open selected entry
-- `Backspace` / `Left`: go to parent directory
-- `Esc`: clear marked entries / close current modal
-- `Ctrl+r`: refresh both panes
-- `F1` / `?`: help
-- `F2` / `r`: rename selected entry
-- `F3` / `v`: view selected file (read-only mode)
-- `F4` / `e`: edit selected file
-- `F5` / `c`: copy
-- `F6` / `m`: move
-- `F7` / `n`: create directory
-- `F8` / `x`: delete
-- `F9` / `i`: toggle info/preview pane
-- `F10` / `q`: quit
+![vcom screenshot](docs/screen.png)
 
 ## Build and run
 
