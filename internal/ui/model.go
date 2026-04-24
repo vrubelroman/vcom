@@ -1377,13 +1377,16 @@ func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int) string 
 		leftWidth = innerWidth
 	}
 	rightWidth := max(innerWidth-leftWidth, 0)
+	columnHeight := max(len(leftRows), len(rightRows))
 	left := lipgloss.NewStyle().
 		Width(leftWidth).
+		Height(columnHeight).
 		Background(palette.PanelElevated).
 		Foreground(palette.Muted).
 		Render(strings.Join(leftRows, "\n"))
 	right := lipgloss.NewStyle().
 		Width(rightWidth).
+		Height(columnHeight).
 		Background(palette.PanelElevated).
 		Foreground(palette.Text).
 		Render(strings.Join(rightRows, "\n"))
