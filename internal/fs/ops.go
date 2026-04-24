@@ -270,6 +270,31 @@ func MakeDir(parent string, name string) (string, error) {
 	return target, nil
 }
 
+func RenamePath(sourcePath string, newName string) (string, error) {
+	newName = filepath.Base(filepath.Clean(newName))
+	if newName == "." || newName == "" {
+		return "", fmt.Errorf("invalid target name")
+	}
+
+	targetPath := filepath.Join(filepath.Dir(sourcePath), newName)
+	if same, err := samePath(sourcePath, targetPath); err != nil {
+		return "", err
+	} else if same {
+		return "", fmt.Errorf("source and target are the same: %s", targetPath)
+	}
+
+	if exists, err := PathExists(targetPath); err != nil {
+		return "", err
+	} else if exists {
+		return "", ErrOverwrite(targetPath)
+	}
+
+	if err := os.Rename(sourcePath, targetPath); err != nil {
+		return "", err
+	}
+	return targetPath, nil
+}
+
 func copyDir(srcDir string, dstDir string, tracker *copyProgressState) error {
 	if tracker != nil && tracker.ctx != nil {
 		if err := tracker.ctx.Err(); err != nil {

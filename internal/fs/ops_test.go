@@ -86,3 +86,50 @@ func TestMovePathWithProgressContextCancelledBeforeStartKeepsSource(t *testing.T
 		t.Fatalf("expected destination file to be absent, stat err=%v", statErr)
 	}
 }
+
+func TestRenamePath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	source := filepath.Join(root, "old.txt")
+	if err := os.WriteFile(source, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	target, err := RenamePath(source, "new.txt")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	if filepath.Base(target) != "new.txt" {
+		t.Fatalf("unexpected target path: %s", target)
+	}
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Fatalf("expected renamed file to exist, stat err=%v", statErr)
+	}
+	if _, statErr := os.Stat(source); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected source to be absent, stat err=%v", statErr)
+	}
+}
+
+func TestRenamePathRejectsExistingTarget(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	source := filepath.Join(root, "old.txt")
+	target := filepath.Join(root, "new.txt")
+	if err := os.WriteFile(source, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	_, err := RenamePath(source, "new.txt")
+	if err == nil {
+		t.Fatalf("expected overwrite error, got nil")
+	}
+	if got, want := err.Error(), ErrOverwrite(target).Error(); got != want {
+		t.Fatalf("expected overwrite error %q, got %q", want, got)
+	}
+}

@@ -26,6 +26,7 @@ type modalKind int
 const (
 	modalNone modalKind = iota
 	modalMkdir
+	modalRename
 	modalConfirm
 	modalCopyProgress
 	modalNotice
@@ -39,6 +40,7 @@ const (
 	opMove
 	opDelete
 	opMkdir
+	opRename
 	opEdit
 	opView
 )
@@ -259,6 +261,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activePane().ClearMarks()
 		case opMkdir:
 			m.status = fmt.Sprintf("Created %s", msg.targetPath)
+		case opRename:
+			m.status = fmt.Sprintf("Renamed to %s", filepath.Base(msg.targetPath))
 		case opEdit:
 			m.status = "Editor closed"
 			return m, tea.Batch(m.loadPreviewCmd(), enableMouseCmd())
@@ -267,9 +271,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, enableMouseCmd()
 		}
 
-		activeSelection := selectedName(m.activePane())
-		_ = m.reloadPane(PaneLeft, activeSelection)
-		_ = m.reloadPane(PaneRight, activeSelection)
+		leftSelection := selectedName(&m.left)
+		rightSelection := selectedName(&m.right)
+		if msg.kind == opRename && msg.targetPath != "" {
+			renamed := filepath.Base(msg.targetPath)
+			if m.active == PaneLeft {
+				leftSelection = renamed
+			} else {
+				rightSelection = renamed
+			}
+		}
+		_ = m.reloadPane(PaneLeft, leftSelection)
+		_ = m.reloadPane(PaneRight, rightSelection)
 		return m, m.loadPreviewCmd()
 
 	case copyPlanMsg:
@@ -423,6 +436,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Help):
 			m.openHelpModal()
 			return m, nil
+		case key.Matches(msg, m.keys.Rename):
+			m.openRenameModal()
+			return m, nil
 		case key.Matches(msg, m.keys.Cancel):
 			if m.infoMode {
 				m.infoMode = false
@@ -575,20 +591,34 @@ func (m Model) View() string {
 
 func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.modal.kind {
-	case modalMkdir:
+	case modalMkdir, modalRename:
 		switch {
-		case isModalCloseKey(msg, m.keys):
+		case msg.String() == "esc":
 			m.modal = modalState{}
 			m.status = "Cancelled"
 			return m, nil
 		case key.Matches(msg, m.keys.Confirm):
 			value := strings.TrimSpace(m.modal.input.Value())
 			if value == "" {
-				m.status = "Directory name must not be empty"
+				if m.modal.kind == modalMkdir {
+					m.status = "Directory name must not be empty"
+				} else {
+					m.status = "Name must not be empty"
+				}
 				return m, nil
 			}
 			m.busy = true
-			return m, mkdirCmd(m.activePane().Path, value)
+			if m.modal.kind == modalMkdir {
+				return m, mkdirCmd(m.activePane().Path, value)
+			}
+			selected, ok := m.activePane().Selected()
+			if !ok || selected.IsParent {
+				m.busy = false
+				m.modal = modalState{}
+				m.status = "No entry selected"
+				return m, nil
+			}
+			return m, renameCmd(selected.Path, value)
 		}
 
 		var cmd tea.Cmd
@@ -1154,6 +1184,28 @@ func (m *Model) openMkdirModal() {
 	}
 }
 
+func (m *Model) openRenameModal() {
+	selected, ok := m.activePane().Selected()
+	if !ok || selected.IsParent {
+		m.status = "Select an entry to rename"
+		return
+	}
+
+	input := textinput.New()
+	input.SetValue(selected.Name)
+	input.Focus()
+	input.CharLimit = 255
+	input.Width = 42
+
+	m.modal = modalState{
+		kind:  modalRename,
+		title: "Rename entry",
+		body:  fmt.Sprintf("Path: %s", selected.Path),
+		note:  "Enter to confirm, Esc to cancel",
+		input: input,
+	}
+}
+
 func (m *Model) openConfirmModal(title, body, note string, pending pendingOperation) {
 	m.modal = modalState{
 		kind:    modalConfirm,
@@ -1176,7 +1228,8 @@ func (m *Model) openHelpModal() {
 		"  Enter / Right  open selected entry",
 		"  Backspace/Left  go to parent directory",
 		"  Tab / h / l    switch active pane",
-		"  r              refresh both panes",
+		"  F2 / r         rename selected entry",
+		"  Ctrl+r         refresh both panes",
 		"",
 		"View and Panels",
 		"  F9 / i         toggle preview/info pane",
@@ -1544,7 +1597,7 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 		lines = append(lines, renderModalBodyLine(raw, contentWidth, palette))
 	}
 
-	if modal.kind == modalMkdir {
+	if modal.kind == modalMkdir || modal.kind == modalRename {
 		lines = append(lines, spacer, lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(modal.input.View()))
 	}
 	if modal.note != "" {
@@ -1603,6 +1656,52 @@ func renderModalNoteLine(raw string, width int, palette theme.Palette, fallback 
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fallback.Render("")
+	}
+
+	if strings.Contains(raw, "Enter") || strings.Contains(raw, "Esc") {
+		var line strings.Builder
+		rest := raw
+		for len(rest) > 0 {
+			enterIdx := strings.Index(rest, "Enter")
+			escIdx := strings.Index(rest, "Esc")
+			nextIdx := -1
+			nextToken := ""
+			nextColor := palette.Muted
+
+			if enterIdx >= 0 {
+				nextIdx = enterIdx
+				nextToken = "Enter"
+				nextColor = palette.ConfirmButton
+			}
+			if escIdx >= 0 && (nextIdx == -1 || escIdx < nextIdx) {
+				nextIdx = escIdx
+				nextToken = "Esc"
+				nextColor = palette.CancelButton
+			}
+			if nextIdx == -1 {
+				line.WriteString(lipgloss.NewStyle().
+					Background(palette.Panel).
+					Foreground(palette.Muted).
+					Render(rest))
+				break
+			}
+			if nextIdx > 0 {
+				line.WriteString(lipgloss.NewStyle().
+					Background(palette.Panel).
+					Foreground(palette.Muted).
+					Render(rest[:nextIdx]))
+			}
+			line.WriteString(lipgloss.NewStyle().
+				Background(palette.Panel).
+				Foreground(nextColor).
+				Bold(true).
+				Render(nextToken))
+			rest = rest[nextIdx+len(nextToken):]
+		}
+		return lipgloss.NewStyle().
+			Width(width).
+			Background(palette.Panel).
+			Render(line.String())
 	}
 
 	for _, sep := range []string{" to ", " (", ","} {
@@ -2228,6 +2327,13 @@ func mkdirCmd(parent, name string) tea.Cmd {
 	return func() tea.Msg {
 		targetPath, err := vfs.MakeDir(parent, name)
 		return opMsg{kind: opMkdir, targetPath: targetPath, err: err}
+	}
+}
+
+func renameCmd(sourcePath, newName string) tea.Cmd {
+	return func() tea.Msg {
+		targetPath, err := vfs.RenamePath(sourcePath, newName)
+		return opMsg{kind: opRename, sourcePath: sourcePath, targetPath: targetPath, err: err}
 	}
 }
 
