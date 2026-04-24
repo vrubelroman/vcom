@@ -1,99 +1,77 @@
 # vcom
 
-`vcom` is a terminal file manager inspired by Midnight Commander and built on top of Charm's TUI stack.
+`vcom` is a terminal file manager inspired by Midnight Commander and built with Charm's TUI stack.
 
-The layout is:
+## Why vcom
 
-- left browser pane
-- right browser pane
+- Two-pane workflow focused on keyboard speed
+- Built-in preview/info pane for the active selection
+- Asynchronous copy/move with progress and background mode
+- Theme support and configurable layout/columns
 
-The key difference from classic `mc` is the inspect mode on `i`. It temporarily replaces the inactive pane with a preview/info panel for the active side selection:
+## Interface
 
-- directory: child entries
-- text file: text preview
-- image: metadata and dimensions
-- binary or unsupported file: safe fallback preview
+`vcom` has two browser panes:
 
-## Goals
+- active pane: navigation and file operations
+- passive pane: target pane for copy/move operations
 
-- MC-like browsing and function-key workflow
-- configurable column layout
-- pleasant default styling
-- readable, editable config with commented-out optional features
-- clean architecture for async file operations and previews
+The preview/info mode (`F9` / `i`) temporarily replaces the inactive pane and shows:
 
-## Current feature set
+- directory listing preview
+- text file preview with syntax highlighting
+- image metadata (format + dimensions)
+- safe fallback for binary files
 
-- MC-like two-pane layout by default
-- preview/info mode on `i`
-- left/right file browsers
-- preview with top metadata widget
-- themes with `catppuccin-mocha` as default
-- runtime theme cycling with `t`
-- configurable visible columns
-- hidden files shown by default
-- hidden files toggle with `.`
-- browser sort cycling with `s`
-- directory size calculation on `Space`
-- overwrite confirmation before copy or move
-- pager on `F3` and editor on `F4` when available
-- basic `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F10` quit
+## Features
 
-## Controls
+- Two-pane file browser
+- Preview/info pane with metadata block
+- Read-only view mode (`F3` / `v`)
+- External editor support (`F4` / `e`)
+- Rename (`F2` / `r`)
+- Copy (`F5` / `c`), move (`F6` / `m`), mkdir (`F7` / `n`), delete (`F8` / `x`)
+- Multi-selection and batch operations
+- Copy/move progress modal with background mode
+- Directory size calculation (`Space`)
+- Sorting cycle (`s`) and hidden files toggle (`.`)
+- Runtime theme cycle (`t`)
 
-- `Tab`: switch active browser pane
-- `Enter`: open directory
-- `Backspace` or `Left`: go to parent directory
-- `i`: replace inactive pane with info/preview for the active pane selection
-- `Space`: calculate selected directory size
-- `.`: toggle hidden entries
-- `s`: cycle sort mode
-- `t`: cycle theme
-- `F3`: open selected file in `$PAGER` if available, otherwise stay in center preview
-- `F4`: open selected file in `$EDITOR`
-- `F5`: copy to passive pane path
-- `F6`: move to passive pane path
-- `F7`: create directory in active pane
-- `F8`: delete selected entry
-- `F10`: quit
+## Default keys
 
-## Run
+- `Tab` / `h` / `l`: switch active pane
+- `j` / `Down`: move down
+- `k` / `Up`: move up
+- `Shift+Down` / `J`: extend selection down
+- `Shift+Up` / `K`: extend selection up
+- `Enter` / `Right`: open selected entry
+- `Backspace` / `Left`: go to parent directory
+- `Esc`: clear marked entries / close current modal
+- `Ctrl+r`: refresh both panes
+- `F1` / `?`: help
+- `F2` / `r`: rename selected entry
+- `F3` / `v`: view selected file (read-only mode)
+- `F4` / `e`: edit selected file
+- `F5` / `c`: copy
+- `F6` / `m`: move
+- `F7` / `n`: create directory
+- `F8` / `x`: delete
+- `F9` / `i`: toggle info/preview pane
+- `F10` / `q`: quit
+
+## Build and run
+
+Run directly:
 
 ```bash
 go run ./cmd/vcom
 ```
 
-To build a local binary:
+Build local binary:
 
 ```bash
 go build -o vcom ./cmd/vcom
 ```
-
-Optional config file lookup order:
-
-1. `-config /path/to/vcom.toml`
-2. `./vcom.toml`
-3. `./config/vcom.toml`
-4. `$XDG_CONFIG_HOME/vcom/vcom.toml`
-5. `~/.config/vcom/vcom.toml`
-
-## Themes
-
-Built-in presets:
-
-- `catppuccin-mocha`
-- `tokyo-night`
-- `gruvbox-dark`
-- `nord-frost`
-
-The sample config in [vcom.toml](/home/vrubel/projects/vcom/vcom.toml) is intentionally written so optional columns and sort variants can be uncommented by hand.
-
-## Notes
-
-- File creation time depends on filesystem and OS support. When unavailable the UI shows `n/a`.
-- Real inline image rendering is intentionally not enabled yet because terminal support is fragmented. The current architecture keeps that as an isolated preview backend to add later.
-
-More detail is in [docs/architecture.md](/home/vrubel/projects/vcom/docs/architecture.md).
 
 ## Installation
 
@@ -102,45 +80,71 @@ More detail is in [docs/architecture.md](/home/vrubel/projects/vcom/docs/archite
 Run directly from the flake:
 
 ```bash
-nix run github:vrubelroman/vcom?ref=<tag>
+nix run github:vrubelroman/vcom?ref=v0.1.2
 ```
 
-Install into the current profile:
+Install into user profile:
 
 ```bash
-nix profile add github:vrubelroman/vcom?ref=<tag>
+nix profile add github:vrubelroman/vcom?ref=v0.1.2
 ```
-
-`nix profile add` installs `vcom` into the current user's Nix profile. It does not edit `configuration.nix`, does not rebuild NixOS, and does not make the package a declarative system package.
 
 ### Debian / Ubuntu
 
-Release builds include a `.deb` artifact. Install it with:
+Download the release `.deb` for `v0.1.2`, then install:
 
 ```bash
-sudo apt install ./vcom_<version>_amd64.deb
+sudo apt install ./vcom_0.1.2_amd64.deb
 ```
 
 ### Arch Linux
 
-A `PKGBUILD` is included in the repository. Build it with:
+A `PKGBUILD` is included in the repository:
 
 ```bash
 makepkg -si
 ```
 
+## Configuration
+
+Optional config lookup order:
+
+1. `-config /path/to/vcom.toml`
+2. `./vcom.toml`
+3. `./config/vcom.toml`
+4. `$XDG_CONFIG_HOME/vcom/vcom.toml`
+5. `~/.config/vcom/vcom.toml`
+
+Reference config: [vcom.toml](/home/vrubel/projects/vcom/vcom.toml)
+
+## Themes
+
+Built-in themes:
+
+- `catppuccin-mocha` (default)
+- `tokyo-night`
+- `gruvbox-dark`
+- `nord-frost`
+
 ## Releases
 
-Tagging a version like `v0.1.0` triggers the GitHub Actions release workflow:
+Pushing a tag like `v0.1.2` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
 
-- runs `go test ./...`
-- vendors Go modules for reproducible packaging
-- builds the release binary
-- builds the `.deb` package with `dpkg-deb`
-- publishes release artifacts to GitHub Releases
+- runs tests
+- vendors Go modules
+- builds release binary
+- builds Debian package
+- publishes release assets
 
-Release artifacts include:
+Release artifacts:
 
-- `vcom-<tag>-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_<version>_amd64.deb`
-- `vcom-<tag>-checksums.txt`
+- `vcom-v0.1.2-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_0.1.2_amd64.deb`
+- `vcom-v0.1.2-checksums.txt`
+
+## Notes
+
+- File creation time depends on filesystem/OS support; unavailable values are shown as `n/a`.
+- Inline image rendering is intentionally disabled for now due to terminal compatibility differences.
+
+Architecture notes: [docs/architecture.md](/home/vrubel/projects/vcom/docs/architecture.md)
