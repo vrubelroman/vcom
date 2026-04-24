@@ -54,7 +54,7 @@ func DefaultKeyMap() KeyMap {
 		SelectUp:       key.NewBinding(key.WithKeys("shift+up", "K"), key.WithHelp("S-↑/K", "select up")),
 		SelectDown:     key.NewBinding(key.WithKeys("shift+down", "J"), key.WithHelp("S-↓/J", "select down")),
 		PageUp:         key.NewBinding(key.WithKeys("pgup"), key.WithHelp("PgUp", "page up")),
-		PageDown:       key.NewBinding(key.WithKeys("pgdown", "f"), key.WithHelp("PgDn/f", "page down")),
+		PageDown:       key.NewBinding(),
 		Open:           key.NewBinding(key.WithKeys("enter", "right"), key.WithHelp("Enter", "open")),
 		Back:           key.NewBinding(key.WithKeys("backspace", "left"), key.WithHelp("←", "parent")),
 		Switch:         key.NewBinding(key.WithKeys("tab", "h", "l"), key.WithHelp("Tab/h/l", "switch pane")),

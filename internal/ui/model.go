@@ -113,6 +113,7 @@ type copyDoneMsg struct {
 }
 
 type dismissNoticeMsg struct{}
+type dismissYankFlashMsg struct{}
 type externalOpenMsg struct {
 	path string
 	err  error
@@ -174,9 +175,10 @@ type Model struct {
 	status string
 	busy   bool
 
-	lastClick mouseClickState
-	hover     hoverState
-	pendingY  bool
+	lastClick     mouseClickState
+	hover         hoverState
+	pendingY      bool
+	yankFlashLine int
 
 	copyJob      *copyJobState
 	nextCopyJob  int
@@ -430,6 +432,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case dismissYankFlashMsg:
+		m.yankFlashLine = -1
+		m.syncPreviewContent()
+		return m, nil
+
 	case externalOpenMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("Open failed: %v", msg.err)
@@ -523,7 +530,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.visualMode {
 					return m.exitVisualMode("Visual mode: off")
 				}
-				return m.toggleVisualMode()
+				if m.cursorMode {
+					return m.toggleVisualMode()
+				}
+				return m, nil
 			case key.Matches(msg, m.keys.Cancel), msg.String() == "q":
 				if m.visualMode {
 					return m.exitVisualMode("Visual mode: off")
@@ -606,7 +616,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Caret):
 			return m.toggleCaretMode()
 		case key.Matches(msg, m.keys.Visual):
-			return m.toggleVisualMode()
+			if m.cursorMode {
+				return m.toggleVisualMode()
+			}
+			return m, nil
 		case key.Matches(msg, m.keys.Edit):
 			return m.handleEdit()
 		case key.Matches(msg, m.keys.Info):
@@ -1530,8 +1543,10 @@ func (m *Model) yankCursorLine() (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("Copy failed: %v", err)
 		return m, nil
 	}
+	m.yankFlashLine = line
+	m.syncPreviewContent()
 	m.status = "Copied current line"
-	return m, nil
+	return m, dismissYankFlashCmd(140 * time.Millisecond)
 }
 
 func (m *Model) cycleSort() (tea.Model, tea.Cmd) {
@@ -1613,7 +1628,6 @@ func (m *Model) openHelpModal() {
 		"  k / Up         move up",
 		"  Shift+Down/J   extend selection down",
 		"  Shift+Up/K     extend selection up",
-		"  PgDn / f       page down",
 		"  PgUp / b       page up",
 		"  Enter / Right  open selected entry",
 		"  Backspace/Left  go to parent directory",
@@ -1625,9 +1639,13 @@ func (m *Model) openHelpModal() {
 		"  F9 / o         toggle preview/info pane",
 		"  F3             plain text view or fullscreen image viewer",
 		"  i              show text caret in preview pane",
-		"  v              visual selection in text preview pane",
+		"  v              start visual selection from caret",
 		"  F3 / Esc / q   close view mode",
+		"  yy             copy current line in caret mode",
 		"  y              copy visual selection to clipboard",
+		"  h / l          move caret left/right",
+		"  w / b          move caret by word",
+		"  q / Esc        close caret/info mode",
 		"  Ctrl+t         mouse selection mode in text preview pane",
 		"  Space          calculate selected directory size",
 		"  s              cycle sort mode",
@@ -1759,6 +1777,10 @@ func (m *Model) renderTextCursorContent() string {
 	selected := lipgloss.NewStyle().
 		Background(m.palette.Marked).
 		Foreground(m.palette.Text)
+	flashed := lipgloss.NewStyle().
+		Background(m.palette.Accent).
+		Foreground(m.palette.Background).
+		Bold(true)
 	cursor := lipgloss.NewStyle().
 		Background(m.palette.Warning).
 		Foreground(m.palette.Background).
@@ -1828,6 +1850,10 @@ func (m *Model) renderTextCursorContent() string {
 				mid = cursor.Render(mid)
 			}
 			line = left + mid + right
+		}
+		if idx == m.yankFlashLine {
+			lines[idx] = flashed.Render(marker + line)
+			continue
 		}
 		lines[idx] = marker + line
 	}
@@ -2967,6 +2993,12 @@ func waitCopyProgressCmd(ch <-chan tea.Msg) tea.Cmd {
 func dismissNoticeCmd(delay time.Duration) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		return dismissNoticeMsg{}
+	})
+}
+
+func dismissYankFlashCmd(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return dismissYankFlashMsg{}
 	})
 }
 
