@@ -1448,7 +1448,7 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 	title := lipgloss.NewStyle().
 		Width(contentWidth).
 		Padding(0, 1).
-		Background(palette.Accent).
+		Background(palette.Info).
 		Foreground(palette.Background).
 		Bold(true).
 		Render("PREVIEW " + previewIcon(preview) + " " + preview.Title)
