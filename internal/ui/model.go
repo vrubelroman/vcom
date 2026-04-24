@@ -437,6 +437,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch {
 		case key.Matches(msg, m.keys.Quit):
+			m.cleanupArchiveMounts()
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Help):
 			m.openHelpModal()
@@ -800,6 +801,14 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 		return m, m.loadPreviewCmd()
 	}
 
+	if isArchiveEntry(selected) {
+		if err := m.enterArchive(selected); err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		return m, m.loadPreviewCmd()
+	}
+
 	if isEditableEntry(selected) {
 		return m.handleEdit()
 	}
@@ -809,6 +818,19 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 func (m *Model) goParent() error {
 	m.hover = hoverState{}
 	pane := m.activePane()
+
+	if mount, ok := pane.CurrentArchive(); ok && pane.Path == mount.RootPath {
+		if _, popped := pane.PopArchive(); popped {
+			_ = os.RemoveAll(mount.TempDir)
+		}
+		pane.Path = mount.ParentPath
+		if err := m.reloadPane(pane.ID, filepath.Base(mount.SourcePath)); err != nil {
+			return err
+		}
+		m.status = fmt.Sprintf("Closed archive %s", filepath.Base(mount.SourcePath))
+		return nil
+	}
+
 	parent := filepath.Dir(pane.Path)
 	if parent == pane.Path {
 		return nil
@@ -878,6 +900,11 @@ func (m *Model) handleDirSize() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
+	if m.activePane().InArchive() && kind != opCopy {
+		m.status = "Archive mode is read-only; only copy is allowed"
+		return m, nil
+	}
+
 	sources := m.operationSources()
 	if len(sources) == 0 {
 		m.status = fmt.Sprintf("Nothing to %s", operationVerb(kind))
@@ -916,6 +943,11 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
+	if m.activePane().InArchive() {
+		m.status = "Archive mode is read-only; delete is disabled"
+		return m, nil
+	}
+
 	sources := m.operationSources()
 	if len(sources) == 0 {
 		m.status = "Nothing to delete"
@@ -1181,6 +1213,11 @@ func (m *Model) cycleSort() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) openMkdirModal() {
+	if m.activePane().InArchive() {
+		m.status = "Archive mode is read-only; create directory is disabled"
+		return
+	}
+
 	input := textinput.New()
 	input.Placeholder = "new-directory"
 	input.Focus()
@@ -1197,6 +1234,11 @@ func (m *Model) openMkdirModal() {
 }
 
 func (m *Model) openRenameModal() {
+	if m.activePane().InArchive() {
+		m.status = "Archive mode is read-only; rename is disabled"
+		return
+	}
+
 	selected, ok := m.activePane().Selected()
 	if !ok || selected.IsParent {
 		m.status = "Select an entry to rename"
@@ -2225,6 +2267,36 @@ func copyPlanCmd(kind fileOpKind, sourcePaths []string, targetDir string, overwr
 	}
 }
 
+func (m *Model) enterArchive(selected vfs.Entry) error {
+	pane := m.activePane()
+	tempDir, err := vfs.ExtractArchiveToTemp(selected.Path)
+	if err != nil {
+		return err
+	}
+	pane.PushArchive(ArchiveMount{
+		SourcePath: selected.Path,
+		ParentPath: pane.Path,
+		RootPath:   tempDir,
+		TempDir:    tempDir,
+	})
+	pane.Path = tempDir
+	if err := m.reloadPane(pane.ID, ""); err != nil {
+		_ = os.RemoveAll(tempDir)
+		_, _ = pane.PopArchive()
+		return err
+	}
+	m.status = fmt.Sprintf("Opened archive %s", selected.DisplayName())
+	return nil
+}
+
+func (m *Model) cleanupArchiveMounts() {
+	for _, pane := range []*BrowserPane{&m.left, &m.right} {
+		for _, mount := range pane.ClearArchives() {
+			_ = os.RemoveAll(mount.TempDir)
+		}
+	}
+}
+
 func deletePlanCmd(sourcePaths []string) tea.Cmd {
 	return func() tea.Msg {
 		stats := vfs.TransferStats{}
@@ -2628,6 +2700,10 @@ func isEditableEntry(entry vfs.Entry) bool {
 	default:
 		return false
 	}
+}
+
+func isArchiveEntry(entry vfs.Entry) bool {
+	return !entry.IsDir && !entry.IsParent && entry.Category() == "archive"
 }
 
 func (m *Model) hoverIndexFor(pane PaneID) int {

@@ -5,6 +5,7 @@
 [ui]
 app_title = "vcom"
 theme = "catppuccin-mocha"
+icon_mode = "auto" # auto | nerd | ascii
 show_title_bar = true
 show_footer = true
 border = "rounded"

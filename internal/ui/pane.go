@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -25,6 +26,14 @@ type BrowserPane struct {
 	Cursor  int
 	Offset  int
 	Marked  map[string]struct{}
+	Archive []ArchiveMount
+}
+
+type ArchiveMount struct {
+	SourcePath string
+	ParentPath string
+	RootPath   string
+	TempDir    string
 }
 
 func (p *BrowserPane) Selected() (vfs.Entry, bool) {
@@ -171,6 +180,59 @@ func (p *BrowserPane) EnsureVisible(pageSize int) {
 	}
 }
 
+func (p *BrowserPane) InArchive() bool {
+	return len(p.Archive) > 0
+}
+
+func (p *BrowserPane) PushArchive(mount ArchiveMount) {
+	p.Archive = append(p.Archive, mount)
+}
+
+func (p *BrowserPane) PopArchive() (ArchiveMount, bool) {
+	if len(p.Archive) == 0 {
+		return ArchiveMount{}, false
+	}
+	last := p.Archive[len(p.Archive)-1]
+	p.Archive = p.Archive[:len(p.Archive)-1]
+	return last, true
+}
+
+func (p *BrowserPane) CurrentArchive() (ArchiveMount, bool) {
+	if len(p.Archive) == 0 {
+		return ArchiveMount{}, false
+	}
+	return p.Archive[len(p.Archive)-1], true
+}
+
+func (p *BrowserPane) ClearArchives() []ArchiveMount {
+	if len(p.Archive) == 0 {
+		return nil
+	}
+	out := make([]ArchiveMount, len(p.Archive))
+	copy(out, p.Archive)
+	p.Archive = nil
+	return out
+}
+
+func (p *BrowserPane) DisplayPath() string {
+	if len(p.Archive) == 0 {
+		return p.Path
+	}
+	top := p.Archive[len(p.Archive)-1]
+	rel, err := filepath.Rel(top.RootPath, p.Path)
+	if err != nil {
+		return p.Path
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." {
+		rel = ""
+	}
+	if rel == "" {
+		return top.SourcePath + "::"
+	}
+	return top.SourcePath + "::/" + rel
+}
+
 func renderPane(
 	pane BrowserPane,
 	cfg config.Config,
@@ -229,7 +291,7 @@ func renderPaneHeader(pane BrowserPane, cfg config.Config, palette theme.Palette
 	return lipgloss.NewStyle().
 		Width(width).
 		Background(headerBg).
-		Render(pathStyle.Render(truncateMiddle(compactPath(pane.Path, cfg.UI.PathDisplay), pathWidth)))
+		Render(pathStyle.Render(truncateMiddle(compactPath(pane.DisplayPath(), cfg.UI.PathDisplay), pathWidth)))
 }
 
 func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, background lipgloss.Color, useNerdIcons bool) string {
