@@ -9,6 +9,20 @@
 - Asynchronous copy/move with progress and background mode
 - Theme support and configurable layout/columns
 
+## Font requirement (icons)
+
+For file icons, `vcom` expects a Nerd Font in your terminal profile.
+
+Default behavior is `ui.icon_mode = "auto"`:
+
+- if a Nerd Font is detected, `vcom` uses Nerd icons
+- if not, `vcom` falls back to ASCII icons automatically
+
+You can force behavior in config:
+
+- `ui.icon_mode = "nerd"`: always use Nerd icons
+- `ui.icon_mode = "ascii"`: always use ASCII icons
+
 Preview mode (`F9` / `i`) temporarily replaces the inactive pane and shows:
 
 - directory listing preview
@@ -60,6 +74,17 @@ Download the release `.deb` for `v0.1.2`, then install:
 sudo apt install ./vcom_0.1.2_amd64.deb
 ```
 
+Install a Nerd Font (example):
+
+```bash
+wget -qO /tmp/JetBrainsMono.zip https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip
+mkdir -p ~/.local/share/fonts/JetBrainsMonoNerd
+unzip -o /tmp/JetBrainsMono.zip -d ~/.local/share/fonts/JetBrainsMonoNerd
+fc-cache -fv
+```
+
+Then set your terminal font to a Nerd Font variant (for example, `JetBrainsMono Nerd Font`).
+
 ### Arch Linux
 
 A `PKGBUILD` is included in the repository:
@@ -79,6 +104,13 @@ Optional config lookup order:
 5. `~/.config/vcom/vcom.toml`
 
 Reference config: [vcom.toml](/home/vrubel/projects/vcom/vcom.toml)
+
+Icon mode example:
+
+```toml
+[ui]
+icon_mode = "auto" # auto | nerd | ascii
+```
 
 ## Themes
 

@@ -64,6 +64,7 @@ type PreviewOptions struct {
 	DirectoryPreviewLimit int
 	HumanReadableSize     bool
 	ThemeName             string
+	UseNerdIcons          bool
 }
 
 func BuildPreview(entry Entry, options PreviewOptions) Preview {
@@ -317,7 +318,7 @@ func buildDirectoryPreview(path string, options PreviewOptions) string {
 		if entry.IsParent {
 			continue
 		}
-		icon := previewIcon(entry)
+		icon := previewIcon(entry, options.UseNerdIcons)
 
 		size := ""
 		if !entry.IsDir {
@@ -338,7 +339,26 @@ func buildDirectoryPreview(path string, options PreviewOptions) string {
 	return strings.Join(lines, "\n")
 }
 
-func previewIcon(entry Entry) string {
+func previewIcon(entry Entry, useNerdIcons bool) string {
+	if !useNerdIcons {
+		switch entry.Category() {
+		case "directory":
+			return "[D]"
+		case "config":
+			return "[C]"
+		case "text":
+			return "[T]"
+		case "image":
+			return "[I]"
+		case "executable":
+			return "[X]"
+		case "archive":
+			return "[A]"
+		default:
+			return "[F]"
+		}
+	}
+
 	switch entry.Category() {
 	case "directory":
 		return ""

@@ -179,6 +179,7 @@ func renderPane(
 	height int,
 	active bool,
 	hoverIndex int,
+	useNerdIcons bool,
 ) string {
 	if width <= 0 || height <= 0 {
 		return ""
@@ -208,8 +209,8 @@ func renderPane(
 		Render(renderPaneHeader(pane, cfg, palette, innerWidth, active, headerBg))
 
 	rowsHeight := max(innerHeight-2, 1)
-	headerRow := renderColumnsHeader(cfg, innerWidth, palette, bodyBg)
-	rows := renderPaneRows(pane, cfg, palette, innerWidth, rowsHeight, active, hoverIndex, bodyBg)
+	headerRow := renderColumnsHeader(cfg, innerWidth, palette, bodyBg, useNerdIcons)
+	rows := renderPaneRows(pane, cfg, palette, innerWidth, rowsHeight, active, hoverIndex, bodyBg, useNerdIcons)
 	content := lipgloss.JoinVertical(lipgloss.Left, header, headerRow, rows)
 	return box.Render(content)
 }
@@ -231,8 +232,8 @@ func renderPaneHeader(pane BrowserPane, cfg config.Config, palette theme.Palette
 		Render(pathStyle.Render(truncateMiddle(compactPath(pane.Path, cfg.UI.PathDisplay), pathWidth)))
 }
 
-func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, background lipgloss.Color) string {
-	columns := buildColumns(cfg, width)
+func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, background lipgloss.Color, useNerdIcons bool) string {
+	columns := buildColumns(cfg, width, useNerdIcons)
 	parts := make([]string, 0, len(columns))
 	for idx, column := range columns {
 		style := lipgloss.NewStyle().
@@ -254,7 +255,7 @@ func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, ba
 		Render(strings.Join(parts, ""))
 }
 
-func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, width int, height int, active bool, hoverIndex int, background lipgloss.Color) string {
+func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, width int, height int, active bool, hoverIndex int, background lipgloss.Color, useNerdIcons bool) string {
 	if len(pane.Entries) == 0 {
 		return lipgloss.NewStyle().
 			Width(width).
@@ -274,7 +275,7 @@ func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, 
 		entry := pane.Entries[idx]
 		isSelected := idx == pane.Cursor && active
 		marked := !entry.IsParent && pane.IsMarked(entry.Path)
-		row := renderEntryRow(entry, cfg, width, isSelected, marked, idx == hoverIndex, active, palette, background)
+		row := renderEntryRow(entry, cfg, width, isSelected, marked, idx == hoverIndex, active, palette, background, useNerdIcons)
 		lines = append(lines, row)
 	}
 	for len(lines) < visibleHeight {
@@ -287,8 +288,8 @@ func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, 
 		Render(strings.Join(lines, "\n"))
 }
 
-func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool, marked bool, hovered bool, active bool, palette theme.Palette, baseBackground lipgloss.Color) string {
-	columns := buildColumns(cfg, width)
+func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool, marked bool, hovered bool, active bool, palette theme.Palette, baseBackground lipgloss.Color, useNerdIcons bool) string {
+	columns := buildColumns(cfg, width, useNerdIcons)
 	rowBackground := baseBackground
 	switch {
 	case marked:
@@ -340,7 +341,7 @@ type columnSpec struct {
 	Value      func(entry vfs.Entry, human bool) string
 }
 
-func buildColumns(cfg config.Config, totalWidth int) []columnSpec {
+func buildColumns(cfg config.Config, totalWidth int, useNerdIcons bool) []columnSpec {
 	fixed := []columnSpec{}
 
 	if cfg.Browser.Columns.Permissions {
@@ -453,7 +454,7 @@ func buildColumns(cfg config.Config, totalWidth int) []columnSpec {
 		Width:    nameWidth,
 		MinWidth: minNameWidth,
 		Value: func(entry vfs.Entry, _ bool) string {
-			return entryIcon(entry) + " " + entry.DisplayName()
+			return entryIcon(entry, useNerdIcons) + " " + entry.DisplayName()
 		},
 	}
 
@@ -583,7 +584,27 @@ func trimToWidthLeft(value string, maxWidth int) string {
 	return string(runes[start:])
 }
 
-func entryIcon(entry vfs.Entry) string {
+func entryIcon(entry vfs.Entry, useNerdIcons bool) string {
+	if !useNerdIcons {
+		switch entry.Category() {
+		case "parent":
+			return "<-"
+		case "directory":
+			return "[D]"
+		case "config":
+			return "[C]"
+		case "text":
+			return "[T]"
+		case "image":
+			return "[I]"
+		case "executable":
+			return "[X]"
+		case "archive":
+			return "[A]"
+		default:
+			return "[F]"
+		}
+	}
 	switch entry.Category() {
 	case "parent":
 		return "↩"

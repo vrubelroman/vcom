@@ -141,6 +141,7 @@ type Model struct {
 	configPath string
 	palette    theme.Palette
 	keys       KeyMap
+	nerdIcons  bool
 
 	width  int
 	height int
@@ -198,6 +199,10 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 		active:       PaneLeft,
 		status:       "Ready",
 		copyProgress: make(chan tea.Msg, 256),
+	}
+	model.nerdIcons, model.status = resolveIconMode(cfg.UI.IconMode)
+	if model.status == "" {
+		model.status = "Ready"
 	}
 
 	model.previewModel = viewport.New(0, 0)
@@ -546,7 +551,7 @@ func (m Model) View() string {
 		if m.active == PaneLeft {
 			panels = lipgloss.JoinHorizontal(
 				lipgloss.Top,
-				renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, true, m.hoverIndexFor(PaneLeft)),
+				renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, true, m.hoverIndexFor(PaneLeft), m.nerdIcons),
 				gap,
 				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight),
 			)
@@ -555,15 +560,15 @@ func (m Model) View() string {
 				lipgloss.Top,
 				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight),
 				gap,
-				renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, true, m.hoverIndexFor(PaneRight)),
+				renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, true, m.hoverIndexFor(PaneRight), m.nerdIcons),
 			)
 		}
 	} else {
 		panels = lipgloss.JoinHorizontal(
 			lipgloss.Top,
-			renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, m.active == PaneLeft, m.hoverIndexFor(PaneLeft)),
+			renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, m.active == PaneLeft, m.hoverIndexFor(PaneLeft), m.nerdIcons),
 			gap,
-			renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, m.active == PaneRight, m.hoverIndexFor(PaneRight)),
+			renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, m.active == PaneRight, m.hoverIndexFor(PaneRight), m.nerdIcons),
 		)
 	}
 
@@ -841,6 +846,7 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 		DirectoryPreviewLimit: m.cfg.Preview.DirectoryPreviewLimit,
 		HumanReadableSize:     m.cfg.Browser.HumanReadableSize,
 		ThemeName:             m.cfg.UI.Theme,
+		UseNerdIcons:          m.nerdIcons,
 	}
 
 	return func() tea.Msg {
@@ -1150,7 +1156,13 @@ func (m *Model) cycleTheme() (tea.Model, tea.Cmd) {
 	}
 	m.cfg.UI.Theme = next
 	m.palette = palette
-	m.status = fmt.Sprintf("Theme: %s", next)
+	savedPath, saveErr := config.Save(m.cfg, m.configPath)
+	if saveErr != nil {
+		m.status = fmt.Sprintf("Theme: %s (save failed: %v)", next, saveErr)
+		return m, nil
+	}
+	m.configPath = savedPath
+	m.status = fmt.Sprintf("Theme: %s (saved)", next)
 	return m, nil
 }
 

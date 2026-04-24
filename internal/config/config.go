@@ -26,6 +26,7 @@ type StartupConfig struct {
 type UIConfig struct {
 	AppTitle           string `toml:"app_title"`
 	Theme              string `toml:"theme"`
+	IconMode           string `toml:"icon_mode"`
 	ShowTitleBar       bool   `toml:"show_title_bar"`
 	ShowFooter         bool   `toml:"show_footer"`
 	Border             string `toml:"border"`
@@ -76,6 +77,7 @@ func Default() Config {
 		UI: UIConfig{
 			AppTitle:           "vcom",
 			Theme:              "catppuccin-mocha",
+			IconMode:           "auto",
 			ShowTitleBar:       true,
 			ShowFooter:         true,
 			Border:             "rounded",
@@ -138,9 +140,48 @@ func Load(explicitPath string) (Config, string, error) {
 	return cfg, path, nil
 }
 
+func Save(cfg Config, path string) (string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", err
+	}
+
+	targetPath := strings.TrimSpace(path)
+	if targetPath == "" {
+		var err error
+		targetPath, err = DefaultUserPath()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	absPath, err := filepath.Abs(targetPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", targetPath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", filepath.Dir(absPath), err)
+	}
+
+	data, err := toml.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.WriteFile(absPath, data, 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", absPath, err)
+	}
+	return absPath, nil
+}
+
 func (c *Config) Validate() error {
 	if c.UI.Theme == "" {
 		return errors.New("ui.theme must not be empty")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.UI.IconMode)) {
+	case "", "auto":
+		c.UI.IconMode = "auto"
+	case "nerd", "ascii":
+	default:
+		return errors.New("ui.icon_mode must be one of: auto, nerd, ascii")
 	}
 	if strings.TrimSpace(c.UI.AppTitle) == "" {
 		c.UI.AppTitle = "vcom"
@@ -212,4 +253,16 @@ func resolvePath(explicitPath string) (string, bool, error) {
 	}
 
 	return "", false, nil
+}
+
+func DefaultUserPath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	xdgDir := os.Getenv("XDG_CONFIG_HOME")
+	if xdgDir == "" {
+		xdgDir = filepath.Join(homeDir, ".config")
+	}
+	return filepath.Join(xdgDir, "vcom", "vcom.toml"), nil
 }
