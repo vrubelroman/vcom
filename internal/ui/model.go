@@ -1273,7 +1273,7 @@ func (m *Model) layoutWidths() (int, int, int) {
 
 func (m *Model) bodyHeight() int {
 	height := m.height
-	if m.cfg.UI.ShowFooter {
+	if m.cfg.UI.ShowFooter && !m.viewMode {
 		height--
 	}
 	return max(height, 8)
