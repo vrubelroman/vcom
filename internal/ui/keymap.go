@@ -4,6 +4,8 @@ import "github.com/charmbracelet/bubbles/key"
 
 type KeyMap struct {
 	Help           key.Binding
+	Visual         key.Binding
+	Caret          key.Binding
 	View           key.Binding
 	Edit           key.Binding
 	Rename         key.Binding
@@ -38,9 +40,11 @@ func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Help:           key.NewBinding(key.WithKeys("f1", "?"), key.WithHelp("F1/?", "help")),
 		Rename:         key.NewBinding(key.WithKeys("f2", "r"), key.WithHelp("F2/r", "rename")),
-		View:           key.NewBinding(key.WithKeys("f3", "v"), key.WithHelp("F3/v", "view")),
+		View:           key.NewBinding(key.WithKeys("f3"), key.WithHelp("F3", "view")),
+		Visual:         key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "visual")),
+		Caret:          key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "caret")),
 		Edit:           key.NewBinding(key.WithKeys("f4", "e"), key.WithHelp("F4/e", "edit")),
-		Info:           key.NewBinding(key.WithKeys("f9", "i"), key.WithHelp("F9/i", "info")),
+		Info:           key.NewBinding(key.WithKeys("f9", "o"), key.WithHelp("F9/o", "info")),
 		SelectText:     key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("C-t", "text select")),
 		ToggleHidden:   key.NewBinding(key.WithKeys("."), key.WithHelp(".", "hidden")),
 		CycleTheme:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
@@ -49,7 +53,7 @@ func DefaultKeyMap() KeyMap {
 		Down:           key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		SelectUp:       key.NewBinding(key.WithKeys("shift+up", "K"), key.WithHelp("S-↑/K", "select up")),
 		SelectDown:     key.NewBinding(key.WithKeys("shift+down", "J"), key.WithHelp("S-↓/J", "select down")),
-		PageUp:         key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("PgUp/b", "page up")),
+		PageUp:         key.NewBinding(key.WithKeys("pgup"), key.WithHelp("PgUp", "page up")),
 		PageDown:       key.NewBinding(key.WithKeys("pgdown", "f"), key.WithHelp("PgDn/f", "page down")),
 		Open:           key.NewBinding(key.WithKeys("enter", "right"), key.WithHelp("Enter", "open")),
 		Back:           key.NewBinding(key.WithKeys("backspace", "left"), key.WithHelp("←", "parent")),
@@ -69,13 +73,13 @@ func DefaultKeyMap() KeyMap {
 }
 
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Help, k.Rename, k.View, k.Copy, k.Move, k.Delete, k.Info, k.Quit}
+	return []key.Binding{k.Help, k.Rename, k.View, k.Visual, k.Copy, k.Delete, k.Info, k.Quit}
 }
 
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Help, k.Up, k.Down, k.SelectUp, k.SelectDown, k.Open, k.Back},
-		{k.Rename, k.View, k.Edit, k.Copy, k.Move, k.Mkdir, k.Delete},
+		{k.Rename, k.View, k.Caret, k.Visual, k.Edit, k.Copy, k.Move, k.Delete},
 		{k.SelectText, k.DirSize, k.Refresh, k.ToggleHidden, k.CycleSort, k.CycleTheme, k.Quit},
 	}
 }

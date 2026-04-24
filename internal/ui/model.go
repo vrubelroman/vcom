@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -152,13 +153,19 @@ type Model struct {
 	width  int
 	height int
 
-	left         BrowserPane
-	right        BrowserPane
-	active       PaneID
-	infoMode     bool
-	selectMode   bool
-	viewMode     bool
-	viewPrevInfo bool
+	left            BrowserPane
+	right           BrowserPane
+	active          PaneID
+	infoMode        bool
+	selectMode      bool
+	cursorMode      bool
+	cursorLine      int
+	cursorCol       int
+	visualMode      bool
+	visualAnchor    int
+	visualAnchorCol int
+	viewMode        bool
+	viewPrevInfo    bool
 
 	previewModel viewport.Model
 	previewData  vfs.Preview
@@ -169,6 +176,7 @@ type Model struct {
 
 	lastClick mouseClickState
 	hover     hoverState
+	pendingY  bool
 
 	copyJob      *copyJobState
 	nextCopyJob  int
@@ -242,6 +250,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectMode && !m.viewMode && msg.preview.Kind != vfs.PreviewKindText {
 			m.selectMode = false
 			return m, enableMouseCmd()
+		}
+		if (m.cursorMode || m.visualMode) && msg.preview.Kind != vfs.PreviewKindText {
+			m.cursorMode = false
+			m.visualMode = false
+			m.status = "Text cursor mode: off"
 		}
 		return m, nil
 
@@ -426,24 +439,136 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if msg.String() != "y" {
+			m.pendingY = false
+		}
 		if m.modal.kind != modalNone {
 			return m.handleModalKey(msg)
 		}
 		if m.viewMode {
+			if m.previewData.Kind == vfs.PreviewKindText && m.infoMode && !m.selectMode {
+				switch {
+				case key.Matches(msg, m.keys.Visual):
+					return m.toggleVisualMode()
+				case msg.String() == "y":
+					return m.yankVisualSelection()
+				}
+			}
 			switch {
-			case key.Matches(msg, m.keys.View), key.Matches(msg, m.keys.Cancel), msg.String() == "q":
+			case key.Matches(msg, m.keys.Cancel):
+				if m.visualMode {
+					return m.exitVisualMode("Visual mode: off")
+				}
+				return m.exitViewMode()
+			case key.Matches(msg, m.keys.View), msg.String() == "q":
 				return m.exitViewMode()
 			case key.Matches(msg, m.keys.Up):
-				m.previewModel.LineUp(1)
+				if m.visualMode {
+					m.moveTextCursorLine(-1)
+				} else {
+					m.previewModel.LineUp(1)
+				}
+				return m, nil
+			case msg.String() == "left":
+				if m.visualMode {
+					m.moveTextCursorCol(-1)
+				}
+				return m, nil
+			case msg.String() == "h":
+				if m.visualMode {
+					m.moveTextCursorCol(-1)
+				}
 				return m, nil
 			case key.Matches(msg, m.keys.Down):
-				m.previewModel.LineDown(1)
+				if m.visualMode {
+					m.moveTextCursorLine(1)
+				} else {
+					m.previewModel.LineDown(1)
+				}
+				return m, nil
+			case msg.String() == "right":
+				if m.visualMode {
+					m.moveTextCursorCol(1)
+				}
+				return m, nil
+			case msg.String() == "l":
+				if m.visualMode {
+					m.moveTextCursorCol(1)
+				}
 				return m, nil
 			case key.Matches(msg, m.keys.PageUp):
-				m.previewModel.LineUp(max(m.previewModel.Height-2, 1))
+				if m.visualMode {
+					m.moveTextCursorLine(-max(m.previewModel.Height-2, 1))
+				} else {
+					m.previewModel.LineUp(max(m.previewModel.Height-2, 1))
+				}
 				return m, nil
 			case key.Matches(msg, m.keys.PageDown):
-				m.previewModel.LineDown(max(m.previewModel.Height-2, 1))
+				if m.visualMode {
+					m.moveTextCursorLine(max(m.previewModel.Height-2, 1))
+				} else {
+					m.previewModel.LineDown(max(m.previewModel.Height-2, 1))
+				}
+				return m, nil
+			default:
+				return m, nil
+			}
+		}
+
+		if (m.cursorMode || m.visualMode) && m.previewData.Kind == vfs.PreviewKindText {
+			switch {
+			case key.Matches(msg, m.keys.Caret):
+				return m.toggleCaretMode()
+			case key.Matches(msg, m.keys.Visual):
+				if m.visualMode {
+					return m.exitVisualMode("Visual mode: off")
+				}
+				return m.toggleVisualMode()
+			case key.Matches(msg, m.keys.Cancel), msg.String() == "q":
+				if m.visualMode {
+					return m.exitVisualMode("Visual mode: off")
+				}
+				return m.exitCaretMode("Caret mode: off")
+			case msg.String() == "y":
+				if !m.visualMode {
+					if m.pendingY {
+						m.pendingY = false
+						return m.yankCursorLine()
+					}
+					m.pendingY = true
+					m.status = "Press y again to copy current line"
+					return m, nil
+				}
+				return m.yankVisualSelection()
+			case key.Matches(msg, m.keys.Up):
+				m.moveTextCursorLine(-1)
+				return m, nil
+			case msg.String() == "left":
+				m.moveTextCursorCol(-1)
+				return m, nil
+			case msg.String() == "h":
+				m.moveTextCursorCol(-1)
+				return m, nil
+			case key.Matches(msg, m.keys.Down):
+				m.moveTextCursorLine(1)
+				return m, nil
+			case msg.String() == "right":
+				m.moveTextCursorCol(1)
+				return m, nil
+			case msg.String() == "l":
+				m.moveTextCursorCol(1)
+				return m, nil
+			case key.Matches(msg, m.keys.PageUp):
+				m.moveTextCursorLine(-max(m.previewModel.Height-2, 1))
+				return m, nil
+			case key.Matches(msg, m.keys.PageDown):
+				m.moveTextCursorLine(max(m.previewModel.Height-2, 1))
+				return m, nil
+			case msg.String() == "w":
+				m.moveTextCursorWordForward()
+				return m, nil
+			case msg.String() == "b":
+				m.moveTextCursorWordBackward()
 				return m, nil
 			default:
 				return m, nil
@@ -461,10 +586,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Rename):
 			m.openRenameModal()
 			return m, nil
-		case key.Matches(msg, m.keys.Cancel):
+		case key.Matches(msg, m.keys.Cancel), msg.String() == "q":
 			if m.infoMode {
 				m.infoMode = false
 				m.selectMode = false
+				m.cursorMode = false
+				m.visualMode = false
 				m.status = "Info pane closed"
 				return m, nil
 			}
@@ -476,6 +603,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.View):
 			return m.handleView()
+		case key.Matches(msg, m.keys.Caret):
+			return m.toggleCaretMode()
+		case key.Matches(msg, m.keys.Visual):
+			return m.toggleVisualMode()
 		case key.Matches(msg, m.keys.Edit):
 			return m.handleEdit()
 		case key.Matches(msg, m.keys.Info):
@@ -568,6 +699,10 @@ func (m Model) View() string {
 			Height(bodyHeight).
 			Background(m.palette.Background).
 			Render("")
+	} else if m.viewMode && m.previewData.Kind == vfs.PreviewKindText {
+		panels = renderSelectionPane(m.previewData, &m.previewModel, m.palette, m.width, bodyHeight)
+	} else if m.viewMode {
+		panels = renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, m.width, bodyHeight)
 	} else if m.selectMode && m.infoMode {
 		panels = renderSelectionPane(m.previewData, &m.previewModel, m.palette, m.width, bodyHeight)
 	} else if m.infoMode {
@@ -1003,12 +1138,16 @@ func (m *Model) handleView() (tea.Model, tea.Cmd) {
 
 	m.viewPrevInfo = m.infoMode
 	m.infoMode = true
-	m.selectMode = true
+	m.selectMode = m.previewData.Kind == vfs.PreviewKindText
+	m.visualMode = false
 	m.viewMode = true
 	m.resizePreview()
 	m.syncPreviewContent()
 	m.status = "View mode: F3/Esc/q to close"
-	return m, tea.Batch(m.loadPreviewCmd(), disableMouseCmd())
+	if m.selectMode {
+		return m, tea.Batch(m.loadPreviewCmd(), disableMouseCmd())
+	}
+	return m, tea.Batch(m.loadPreviewCmd(), enableMouseCmd())
 }
 
 func (m *Model) exitViewMode() (tea.Model, tea.Cmd) {
@@ -1017,6 +1156,7 @@ func (m *Model) exitViewMode() (tea.Model, tea.Cmd) {
 	}
 	m.viewMode = false
 	m.selectMode = false
+	m.visualMode = false
 	m.infoMode = m.viewPrevInfo
 	m.resizePreview()
 	m.syncPreviewContent()
@@ -1127,6 +1267,8 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonRight:
 		if m.infoMode && m.mouseOverPreview(msg.X, msg.Y) {
 			m.infoMode = false
+			m.cursorMode = false
+			m.visualMode = false
 			m.resizePreview()
 			m.syncPreviewContent()
 			m.status = "Info mode: off"
@@ -1140,6 +1282,8 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 		if m.infoMode && paneID == m.active && index == m.activePane().Cursor {
 			m.infoMode = false
+			m.cursorMode = false
+			m.visualMode = false
 			m.hover = hoverState{pane: paneID, index: index, ok: true}
 			m.status = "Info mode: off"
 			return m, nil
@@ -1174,8 +1318,17 @@ func (m *Model) toggleInfo() (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("Info mode: %s selection", strings.ToUpper(string(m.active)))
 		return m, m.loadPreviewCmd()
 	}
+	wasSelect := m.selectMode
 	if m.selectMode {
 		m.selectMode = false
+	}
+	if m.cursorMode {
+		m.cursorMode = false
+	}
+	if m.visualMode {
+		m.visualMode = false
+	}
+	if wasSelect {
 		return m, enableMouseCmd()
 	}
 	m.status = "Info mode: off"
@@ -1184,7 +1337,7 @@ func (m *Model) toggleInfo() (tea.Model, tea.Cmd) {
 
 func (m *Model) toggleSelectMode() (tea.Model, tea.Cmd) {
 	if m.viewMode {
-		m.status = "Close view mode first (F3/Esc/q)"
+		m.status = "Use v/y in F3 view for keyboard selection"
 		return m, nil
 	}
 	if m.selectMode {
@@ -1199,6 +1352,100 @@ func (m *Model) toggleSelectMode() (tea.Model, tea.Cmd) {
 	m.selectMode = true
 	m.status = "Text selection mode: on"
 	return m, disableMouseCmd()
+}
+
+func (m *Model) toggleCaretMode() (tea.Model, tea.Cmd) {
+	if m.viewMode {
+		m.status = "F3 uses plain text mouse selection"
+		return m, nil
+	}
+	if m.selectMode {
+		m.status = "Disable Ctrl+T mouse selection first"
+		return m, nil
+	}
+	if !m.infoMode || m.previewData.Kind != vfs.PreviewKindText {
+		m.status = "Caret mode works only for text preview in info pane"
+		return m, nil
+	}
+	if m.cursorMode {
+		return m.exitCaretMode("Caret mode: off")
+	}
+
+	lineCount := len(m.previewPlainLines())
+	if lineCount == 0 {
+		m.status = "Nothing to navigate"
+		return m, nil
+	}
+	m.cursorMode = true
+	m.cursorLine = clamp(m.previewModel.YOffset, 0, lineCount-1)
+	m.cursorCol = clamp(m.cursorCol, 0, m.lineRuneCount(m.cursorLine))
+	m.visualMode = false
+	m.ensureTextCursorVisible()
+	m.syncPreviewContent()
+	m.status = "Caret mode: h/j/k/l move, v select, Esc exit"
+	return m, nil
+}
+
+func (m *Model) exitCaretMode(status string) (tea.Model, tea.Cmd) {
+	if !m.cursorMode {
+		m.status = status
+		return m, nil
+	}
+	m.cursorMode = false
+	m.visualMode = false
+	m.syncPreviewContent()
+	m.status = status
+	return m, nil
+}
+
+func (m *Model) toggleVisualMode() (tea.Model, tea.Cmd) {
+	if m.viewMode {
+		m.status = "F3 uses plain text mouse selection; visual mode is for info pane"
+		return m, nil
+	}
+	if m.selectMode {
+		m.status = "Disable Ctrl+T mouse selection first"
+		return m, nil
+	}
+	if !m.infoMode || m.previewData.Kind != vfs.PreviewKindText {
+		m.status = "Visual mode works only for text preview"
+		return m, nil
+	}
+	if m.visualMode {
+		return m.exitVisualMode("Visual mode: off")
+	}
+
+	lineCount := len(m.previewPlainLines())
+	if lineCount == 0 {
+		m.status = "Nothing to select"
+		return m, nil
+	}
+	start := clamp(m.previewModel.YOffset, 0, lineCount-1)
+	if m.cursorMode {
+		start = clamp(m.cursorLine, 0, lineCount-1)
+	} else {
+		m.cursorMode = true
+		m.cursorLine = start
+		m.cursorCol = 0
+	}
+	m.visualMode = true
+	m.visualAnchor = start
+	m.visualAnchorCol = m.cursorCol
+	m.ensureTextCursorVisible()
+	m.syncPreviewContent()
+	m.status = "Visual mode: h/j/k/l move, y copy, Esc exit"
+	return m, nil
+}
+
+func (m *Model) exitVisualMode(status string) (tea.Model, tea.Cmd) {
+	if !m.visualMode {
+		m.status = status
+		return m, nil
+	}
+	m.visualMode = false
+	m.syncPreviewContent()
+	m.status = status
+	return m, nil
 }
 
 func (m *Model) toggleHidden() (tea.Model, tea.Cmd) {
@@ -1222,6 +1469,68 @@ func (m *Model) cycleTheme() (tea.Model, tea.Cmd) {
 	}
 	m.configPath = savedPath
 	m.status = fmt.Sprintf("Theme: %s (saved)", next)
+	return m, nil
+}
+
+func copyTextToClipboard(text string) error {
+	if err := clipboard.WriteAll(text); err == nil {
+		return nil
+	}
+	_, err := fmt.Fprint(os.Stderr, ansi.SetSystemClipboard(text))
+	return err
+}
+
+func (m *Model) yankVisualSelection() (tea.Model, tea.Cmd) {
+	if !m.visualMode || m.previewData.Kind != vfs.PreviewKindText {
+		m.status = "Visual mode is not active"
+		return m, nil
+	}
+
+	lines := m.previewPlainLines()
+	if len(lines) == 0 {
+		return m.exitVisualMode("Nothing to copy")
+	}
+	startLine, startCol, endLine, endCol := m.visualSelectionBounds()
+	startLine = clamp(startLine, 0, len(lines)-1)
+	endLine = clamp(endLine, 0, len(lines)-1)
+
+	parts := make([]string, 0, endLine-startLine+1)
+	for line := startLine; line <= endLine; line++ {
+		raw := lines[line]
+		lineStart := 0
+		lineEnd := len([]rune(raw))
+		if line == startLine {
+			lineStart = clamp(startCol, 0, lineEnd)
+		}
+		if line == endLine {
+			lineEnd = clamp(endCol, lineStart, len([]rune(raw)))
+		}
+		parts = append(parts, sliceRunes(raw, lineStart, lineEnd))
+	}
+	text := strings.Join(parts, "\n")
+	if err := copyTextToClipboard(text); err != nil {
+		m.status = fmt.Sprintf("Copy failed: %v", err)
+		return m, nil
+	}
+	return m.exitVisualMode("Copied selection")
+}
+
+func (m *Model) yankCursorLine() (tea.Model, tea.Cmd) {
+	if !m.cursorMode || m.previewData.Kind != vfs.PreviewKindText {
+		m.status = "Caret mode is not active"
+		return m, nil
+	}
+	lines := m.previewPlainLines()
+	if len(lines) == 0 {
+		m.status = "Nothing to copy"
+		return m, nil
+	}
+	line := clamp(m.cursorLine, 0, len(lines)-1)
+	if err := copyTextToClipboard(lines[line]); err != nil {
+		m.status = fmt.Sprintf("Copy failed: %v", err)
+		return m, nil
+	}
+	m.status = "Copied current line"
 	return m, nil
 }
 
@@ -1313,10 +1622,13 @@ func (m *Model) openHelpModal() {
 		"  Ctrl+r         refresh both panes",
 		"",
 		"View and Panels",
-		"  F9 / i         toggle preview/info pane",
-		"  F3 / v         text view mode or fullscreen image viewer",
+		"  F9 / o         toggle preview/info pane",
+		"  F3             plain text view or fullscreen image viewer",
+		"  i              show text caret in preview pane",
+		"  v              visual selection in text preview pane",
 		"  F3 / Esc / q   close view mode",
-		"  Ctrl+t         toggle text selection mode in text preview",
+		"  y              copy visual selection to clipboard",
+		"  Ctrl+t         mouse selection mode in text preview pane",
 		"  Space          calculate selected directory size",
 		"  s              cycle sort mode",
 		"  .              toggle hidden files",
@@ -1365,10 +1677,262 @@ func (m *Model) applyPreview(preview vfs.Preview) {
 
 func (m *Model) syncPreviewContent() {
 	content := m.previewData.Body
+	if (m.cursorMode || m.visualMode) && m.previewData.Kind == vfs.PreviewKindText {
+		content = m.renderTextCursorContent()
+	}
 	if m.cfg.Preview.WrapText && m.previewModel.Width > 0 {
 		content = lipgloss.NewStyle().Width(m.previewModel.Width).Render(content)
 	}
 	m.previewModel.SetContent(content)
+}
+
+func (m Model) previewPlainLines() []string {
+	content := m.previewData.PlainBody
+	if content == "" {
+		content = m.previewData.Body
+	}
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	return strings.Split(content, "\n")
+}
+
+func (m Model) previewRenderedLines() []string {
+	content := m.previewData.Body
+	if content == "" {
+		content = m.previewData.PlainBody
+	}
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	return strings.Split(content, "\n")
+}
+
+func (m Model) lineRuneCount(line int) int {
+	lines := m.previewPlainLines()
+	if line < 0 || line >= len(lines) {
+		return 0
+	}
+	return len([]rune(lines[line]))
+}
+
+func sliceRunes(text string, start int, end int) string {
+	runes := []rune(text)
+	start = clamp(start, 0, len(runes))
+	end = clamp(end, start, len(runes))
+	return string(runes[start:end])
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || r == '-' || r == '.' ||
+		(r >= '0' && r <= '9') ||
+		(r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= 'А' && r <= 'я') ||
+		(r >= 'Ё' && r <= 'ё')
+}
+
+func normalizeSelection(startLine, startCol, endLine, endCol int) (int, int, int, int) {
+	if startLine == endLine && startCol == endCol {
+		return startLine, startCol, endLine, endCol + 1
+	}
+	if startLine < endLine || (startLine == endLine && startCol <= endCol) {
+		return startLine, startCol, endLine, endCol + 1
+	}
+	return endLine, endCol, startLine, startCol + 1
+}
+
+func (m Model) visualSelectionBounds() (int, int, int, int) {
+	return normalizeSelection(m.visualAnchor, m.visualAnchorCol, m.cursorLine, m.cursorCol)
+}
+
+func (m *Model) renderTextCursorContent() string {
+	lines := append([]string(nil), m.previewRenderedLines()...)
+	plainLines := m.previewPlainLines()
+	if len(lines) == 0 {
+		return ""
+	}
+	startLine, startCol, endLine, endCol := m.visualSelectionBounds()
+	hasSelection := false
+	if m.visualMode {
+		startLine = clamp(startLine, 0, len(lines)-1)
+		endLine = clamp(endLine, 0, len(lines)-1)
+		hasSelection = startLine != endLine || startCol != endCol
+	}
+
+	selected := lipgloss.NewStyle().
+		Background(m.palette.Marked).
+		Foreground(m.palette.Text)
+	cursor := lipgloss.NewStyle().
+		Background(m.palette.Warning).
+		Foreground(m.palette.Background).
+		Bold(true)
+	gutterBase := lipgloss.NewStyle().
+		Width(2).
+		Foreground(m.palette.Muted)
+	gutterAnchor := lipgloss.NewStyle().
+		Width(2).
+		Foreground(m.palette.Info).
+		Bold(true)
+	gutterCursor := lipgloss.NewStyle().
+		Width(2).
+		Foreground(m.palette.Accent).
+		Bold(true)
+	gutterBoth := lipgloss.NewStyle().
+		Width(2).
+		Foreground(m.palette.Warning).
+		Bold(true)
+
+	for idx := range lines {
+		marker := "  "
+		switch {
+		case m.visualMode && idx == m.visualAnchor && idx == m.cursorLine:
+			marker = gutterBoth.Render("◆ ")
+		case m.visualMode && idx == m.visualAnchor:
+			marker = gutterAnchor.Render("│ ")
+		case idx == m.cursorLine:
+			marker = gutterCursor.Render("▶ ")
+		default:
+			marker = gutterBase.Render("  ")
+		}
+
+		line := lines[idx]
+		plain := ""
+		if idx < len(plainLines) {
+			plain = plainLines[idx]
+		}
+		lineLen := len([]rune(plain))
+		cursorCol := clamp(m.cursorCol, 0, lineLen)
+
+		if hasSelection && idx >= startLine && idx <= endLine {
+			segStart := 0
+			segEnd := lineLen
+			if idx == startLine {
+				segStart = clamp(startCol, 0, lineLen)
+			}
+			if idx == endLine {
+				segEnd = clamp(endCol, segStart, lineLen)
+			}
+			left := ansi.Cut(line, 0, segStart)
+			mid := ansi.Cut(line, segStart, segEnd)
+			right := ansi.Cut(line, segEnd, lineLen)
+			if mid != "" {
+				line = left + selected.Render(mid) + right
+			}
+		}
+
+		if idx == m.cursorLine {
+			left := ansi.Cut(line, 0, cursorCol)
+			mid := ansi.Cut(line, cursorCol, min(cursorCol+1, max(lineLen, cursorCol+1)))
+			right := ansi.Cut(line, min(cursorCol+1, lineLen), lineLen)
+			if cursorCol >= lineLen {
+				mid = cursor.Render(" ")
+				right = ""
+			} else {
+				mid = cursor.Render(mid)
+			}
+			line = left + mid + right
+		}
+		lines[idx] = marker + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *Model) moveTextCursorWordForward() {
+	if !m.cursorMode {
+		return
+	}
+	lines := m.previewPlainLines()
+	if len(lines) == 0 {
+		return
+	}
+
+	line := clamp(m.cursorLine, 0, len(lines)-1)
+	col := clamp(m.cursorCol, 0, len([]rune(lines[line])))
+	for {
+		runes := []rune(lines[line])
+		for col < len(runes) && isWordRune(runes[col]) {
+			col++
+		}
+		for col < len(runes) && !isWordRune(runes[col]) {
+			col++
+		}
+		if col < len(runes) {
+			m.cursorLine = line
+			m.cursorCol = col
+			m.ensureTextCursorVisible()
+			m.syncPreviewContent()
+			return
+		}
+		if line >= len(lines)-1 {
+			m.cursorLine = line
+			m.cursorCol = len(runes)
+			m.ensureTextCursorVisible()
+			m.syncPreviewContent()
+			return
+		}
+		line++
+		col = 0
+	}
+}
+
+func (m *Model) moveTextCursorWordBackward() {
+	if !m.cursorMode {
+		return
+	}
+	lines := m.previewPlainLines()
+	if len(lines) == 0 {
+		return
+	}
+
+	line := clamp(m.cursorLine, 0, len(lines)-1)
+	col := clamp(m.cursorCol, 0, len([]rune(lines[line])))
+	for {
+		runes := []rune(lines[line])
+		if col > len(runes) {
+			col = len(runes)
+		}
+
+		// Start from the character immediately before the cursor.
+		if col == 0 {
+			if line == 0 {
+				m.cursorLine = 0
+				m.cursorCol = 0
+				m.ensureTextCursorVisible()
+				m.syncPreviewContent()
+				return
+			}
+			line--
+			col = len([]rune(lines[line]))
+			continue
+		}
+
+		col--
+		for {
+			runes = []rune(lines[line])
+			for col >= 0 && !isWordRune(runes[col]) {
+				col--
+			}
+			if col >= 0 {
+				break
+			}
+			if line == 0 {
+				m.cursorLine = 0
+				m.cursorCol = 0
+				m.ensureTextCursorVisible()
+				m.syncPreviewContent()
+				return
+			}
+			line--
+			runes = []rune(lines[line])
+			col = len(runes) - 1
+		}
+
+		for col > 0 && isWordRune(runes[col-1]) {
+			col--
+		}
+		m.cursorLine = line
+		m.cursorCol = col
+		m.ensureTextCursorVisible()
+		m.syncPreviewContent()
+		return
+	}
 }
 
 func (m *Model) activePane() *BrowserPane {
@@ -1429,6 +1993,44 @@ func (m *Model) resizePreview() {
 	innerHeight := max(m.bodyHeight()-2, 1)
 	m.previewModel.Width = max(innerWidth-2, 10)
 	m.previewModel.Height = max(innerHeight-metaHeight-3, 3)
+}
+
+func (m *Model) moveTextCursorLine(delta int) {
+	lines := m.previewPlainLines()
+	if len(lines) == 0 {
+		return
+	}
+	if !m.cursorMode {
+		return
+	}
+	m.cursorLine = clamp(m.cursorLine+delta, 0, len(lines)-1)
+	m.cursorCol = clamp(m.cursorCol, 0, m.lineRuneCount(m.cursorLine))
+	m.ensureTextCursorVisible()
+	m.syncPreviewContent()
+}
+
+func (m *Model) moveTextCursorCol(delta int) {
+	if !m.cursorMode {
+		return
+	}
+	m.cursorCol = clamp(m.cursorCol+delta, 0, m.lineRuneCount(m.cursorLine))
+	m.ensureTextCursorVisible()
+	m.syncPreviewContent()
+}
+
+func (m *Model) ensureTextCursorVisible() {
+	if !m.cursorMode {
+		return
+	}
+	visible := max(m.previewModel.Height, 1)
+	if m.cursorLine < m.previewModel.YOffset {
+		m.previewModel.SetYOffset(m.cursorLine)
+		return
+	}
+	bottom := m.previewModel.YOffset + visible - 1
+	if m.cursorLine > bottom {
+		m.previewModel.SetYOffset(m.cursorLine - visible + 1)
+	}
 }
 
 func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg config.Config, palette theme.Palette, width int, height int) string {
@@ -1632,6 +2234,17 @@ func renderFooter(m Model) string {
 			Foreground(m.palette.Info).
 			Bold(true).
 			Render("SELECT TEXT MODE")
+		if line != "" {
+			line += sep
+		}
+		line += modeLabel
+	}
+	if m.visualMode {
+		modeLabel := lipgloss.NewStyle().
+			Background(m.palette.Footer).
+			Foreground(m.palette.Marked).
+			Bold(true).
+			Render("VISUAL MODE")
 		if line != "" {
 			line += sep
 		}
@@ -2664,6 +3277,16 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func clamp(n, low, high int) int {
+	if n < low {
+		return low
+	}
+	if n > high {
+		return high
+	}
+	return n
 }
 
 func max(a, b int) int {
