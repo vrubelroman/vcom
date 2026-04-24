@@ -1603,7 +1603,7 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 	if modal.note != "" {
 		lines = append(lines, spacer)
 		if modal.note == "confirm-actions" {
-			lines = append(lines, renderConfirmActions(contentWidth, palette))
+			lines = append(lines, renderModalNoteLine("Enter to confirm, Esc to cancel", contentWidth, palette, noteStyle))
 		} else {
 			for _, raw := range strings.Split(modal.note, "\n") {
 				lines = append(lines, renderModalNoteLine(raw, contentWidth, palette, noteStyle))
@@ -1658,50 +1658,8 @@ func renderModalNoteLine(raw string, width int, palette theme.Palette, fallback 
 		return fallback.Render("")
 	}
 
-	if strings.Contains(raw, "Enter") || strings.Contains(raw, "Esc") {
-		var line strings.Builder
-		rest := raw
-		for len(rest) > 0 {
-			enterIdx := strings.Index(rest, "Enter")
-			escIdx := strings.Index(rest, "Esc")
-			nextIdx := -1
-			nextToken := ""
-			nextColor := palette.Muted
-
-			if enterIdx >= 0 {
-				nextIdx = enterIdx
-				nextToken = "Enter"
-				nextColor = palette.ConfirmButton
-			}
-			if escIdx >= 0 && (nextIdx == -1 || escIdx < nextIdx) {
-				nextIdx = escIdx
-				nextToken = "Esc"
-				nextColor = palette.CancelButton
-			}
-			if nextIdx == -1 {
-				line.WriteString(lipgloss.NewStyle().
-					Background(palette.Panel).
-					Foreground(palette.Muted).
-					Render(rest))
-				break
-			}
-			if nextIdx > 0 {
-				line.WriteString(lipgloss.NewStyle().
-					Background(palette.Panel).
-					Foreground(palette.Muted).
-					Render(rest[:nextIdx]))
-			}
-			line.WriteString(lipgloss.NewStyle().
-				Background(palette.Panel).
-				Foreground(nextColor).
-				Bold(true).
-				Render(nextToken))
-			rest = rest[nextIdx+len(nextToken):]
-		}
-		return lipgloss.NewStyle().
-			Width(width).
-			Background(palette.Panel).
-			Render(line.String())
+	if highlighted, ok := renderModalHintTokens(raw, width, palette, palette.Muted); ok {
+		return highlighted
 	}
 
 	for _, sep := range []string{" to ", " (", ","} {
@@ -1724,6 +1682,69 @@ func renderModalNoteLine(raw string, width int, palette theme.Palette, fallback 
 	}
 
 	return fallback.Render(raw)
+}
+
+func renderModalHintTokens(raw string, width int, palette theme.Palette, baseColor lipgloss.Color) (string, bool) {
+	type tokenStyle struct {
+		token string
+		color lipgloss.Color
+	}
+	tokens := []tokenStyle{
+		{token: "Background", color: palette.Info},
+		{token: "Cancel", color: palette.CancelButton},
+		{token: "Enter", color: palette.ConfirmButton},
+		{token: "Esc", color: palette.CancelButton},
+	}
+	contains := false
+	for _, entry := range tokens {
+		if strings.Contains(raw, entry.token) {
+			contains = true
+			break
+		}
+	}
+	if !contains {
+		return "", false
+	}
+
+	var line strings.Builder
+	rest := raw
+	for len(rest) > 0 {
+		nextIdx := -1
+		nextToken := ""
+		nextColor := baseColor
+		for _, entry := range tokens {
+			idx := strings.Index(rest, entry.token)
+			if idx >= 0 && (nextIdx == -1 || idx < nextIdx) {
+				nextIdx = idx
+				nextToken = entry.token
+				nextColor = entry.color
+			}
+		}
+		if nextIdx == -1 {
+			line.WriteString(lipgloss.NewStyle().
+				Background(palette.Panel).
+				Foreground(baseColor).
+				Render(rest))
+			break
+		}
+		if nextIdx > 0 {
+			line.WriteString(lipgloss.NewStyle().
+				Background(palette.Panel).
+				Foreground(baseColor).
+				Render(rest[:nextIdx]))
+		}
+		line.WriteString(lipgloss.NewStyle().
+			Background(palette.Panel).
+			Foreground(nextColor).
+			Bold(true).
+			Render(nextToken))
+		rest = rest[nextIdx+len(nextToken):]
+	}
+
+	return lipgloss.NewStyle().
+		Width(width).
+		Background(palette.Panel).
+		Render(line.String()), true
 }
 
 func renderConfirmActions(width int, palette theme.Palette) string {
@@ -1831,7 +1852,12 @@ func renderHelpModal(modal modalState, palette theme.Palette, width int) string 
 	}
 
 	if modal.note != "" {
-		lines = append(lines, spacer, noteStyle.Render(modal.note))
+		lines = append(lines, spacer)
+		if highlighted, ok := renderModalHintTokens(modal.note, contentWidth, palette, palette.FooterKey); ok {
+			lines = append(lines, highlighted)
+		} else {
+			lines = append(lines, noteStyle.Render(modal.note))
+		}
 	}
 
 	return box.Render(strings.Join(lines, "\n"))
@@ -1900,7 +1926,7 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 		renderProgressStatLine("Size:", fmt.Sprintf("%s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true)), contentWidth, palette),
 		renderProgressStatLine("Speed:", transferSpeed(progress.BytesDone, job.startedAt), contentWidth, palette),
 		spacer,
-		renderProgressActions(contentWidth, palette),
+		renderModalNoteLine("Background / b, Cancel / c", contentWidth, palette, mutedStyle),
 	}
 	if job.background {
 		lines = append(lines, mutedStyle.Render("Transfer continues in background"))
