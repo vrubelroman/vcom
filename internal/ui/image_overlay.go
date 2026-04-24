@@ -127,36 +127,68 @@ func (m *imageOverlayManager) startBackend(backend string) error {
 	return nil
 }
 
+func (m *imageOverlayManager) startLegacyBackend() error {
+	cmd := exec.Command("ueberzug", "layer", "--parser", "json")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		return err
+	}
+	m.cmd = cmd
+	m.stdin = stdin
+	m.running = true
+	m.backend = "ueberzug"
+	return nil
+}
+
 func (m *imageOverlayManager) ensureStarted() error {
 	if m.running {
 		return nil
 	}
-	if _, err := exec.LookPath("ueberzugpp"); err != nil {
-		return err
+
+	if _, err := exec.LookPath("ueberzugpp"); err == nil {
+		var lastErr error
+		for _, backend := range m.backendList() {
+			if err := m.startBackend(backend); err != nil {
+				lastErr = err
+				continue
+			}
+			// Probe command channel right away; some backends terminate instantly.
+			if err := m.send(map[string]any{
+				"action":     "remove",
+				"identifier": m.identifier,
+			}); err != nil {
+				lastErr = err
+				m.stop()
+				continue
+			}
+			return nil
+		}
+		if lastErr != nil {
+			return lastErr
+		}
 	}
 
-	var lastErr error
-	for _, backend := range m.backendList() {
-		if err := m.startBackend(backend); err != nil {
-			lastErr = err
-			continue
+	if _, err := exec.LookPath("ueberzug"); err == nil {
+		if err := m.startLegacyBackend(); err != nil {
+			return err
 		}
-		// Probe command channel right away; some backends terminate instantly.
 		if err := m.send(map[string]any{
 			"action":     "remove",
 			"identifier": m.identifier,
 		}); err != nil {
-			lastErr = err
 			m.stop()
-			continue
+			return err
 		}
 		return nil
 	}
 
-	if lastErr != nil {
-		return lastErr
-	}
-	return fmt.Errorf("could not start ueberzugpp overlay")
+	return fmt.Errorf("could not start image overlay backend")
 }
 
 func (m *imageOverlayManager) send(payload map[string]any) error {
@@ -202,12 +234,16 @@ func (m *imageOverlayManager) show(path string, rect overlayRect) error {
 			"path":       path,
 			"x":          rect.x,
 			"y":          rect.y,
-			"max_width":  rect.width,
-			"max_height": rect.height,
-			"scaler":     "fit_contain",
+		}
+		if m.backend == "ueberzug" {
+			payload["width"] = rect.width
+			payload["height"] = rect.height
+		} else {
+			payload["max_width"] = rect.width
+			payload["max_height"] = rect.height
+			payload["scaler"] = "fit_contain"
 		}
 		if err := m.send(payload); err == nil {
-			m.backend = "ueberzugpp"
 			m.visible = true
 			m.lastPath = path
 			m.lastRect = rect
@@ -215,8 +251,10 @@ func (m *imageOverlayManager) show(path string, rect overlayRect) error {
 		}
 
 		m.stop()
-		if len(m.backends) > 0 {
+		if m.backend != "ueberzug" && len(m.backends) > 0 {
 			m.backends = append(m.backends[1:], m.backends[0])
+		} else {
+			break
 		}
 	}
 	return fmt.Errorf("could not render image overlay")
@@ -229,7 +267,7 @@ func (m *imageOverlayManager) hide() {
 	switch m.backend {
 	case "kitty":
 		m.clearKitty()
-	case "ueberzugpp":
+	case "ueberzugpp", "ueberzug":
 		if m.running {
 			_ = m.send(map[string]any{
 				"action":     "remove",
