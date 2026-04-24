@@ -64,23 +64,23 @@ go build -o vcom ./cmd/vcom
 Run directly from the flake:
 
 ```bash
-nix run github:vrubelroman/vcom?ref=v0.1.7
+nix run github:vrubelroman/vcom?ref=v0.1.8
 ```
 
 Install into user profile:
 
 ```bash
-nix profile add github:vrubelroman/vcom?ref=v0.1.7
+nix profile add github:vrubelroman/vcom?ref=v0.1.8
 ```
 
 The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works in non-`kitty` terminals out of the box.
 
 ### Debian / Ubuntu
 
-Download the release `.deb` for `v0.1.7`, then install:
+Download the release `.deb` for `v0.1.8`, then install:
 
 ```bash
-sudo apt install ./vcom_0.1.7_amd64.deb
+sudo apt install ./vcom_0.1.8_amd64.deb
 ```
 
 The Debian package declares `ueberzug` (or `ueberzugpp` where available) as a dependency for image preview outside `kitty`.
@@ -136,7 +136,7 @@ Built-in themes:
 
 ## Releases
 
-Pushing a tag like `v0.1.7` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
+Pushing a tag like `v0.1.8` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
 
 - runs tests
 - vendors Go modules
@@ -146,9 +146,9 @@ Pushing a tag like `v0.1.7` triggers GitHub Actions release workflow (`.github/w
 
 Release artifacts:
 
-- `vcom-v0.1.7-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_0.1.7_amd64.deb`
-- `vcom-v0.1.7-checksums.txt`
+- `vcom-v0.1.8-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_0.1.8_amd64.deb`
+- `vcom-v0.1.8-checksums.txt`
 
 ## Notes
 

@@ -1,13 +1,21 @@
 package ui
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"os"
 	"os/exec"
 	"slices"
 	"strings"
+
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 )
 
 type overlayRect struct {
@@ -31,6 +39,17 @@ type imageOverlayManager struct {
 	kittyOK    bool
 }
 
+const kittyImageID = 31337
+const assumedCellAspect = 0.5
+const kittyPixelsPerCell = 16
+
+func minFloat(a float64, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func newImageOverlayManager() *imageOverlayManager {
 	return &imageOverlayManager{identifier: "vcom-preview"}
 }
@@ -49,33 +68,134 @@ func (m *imageOverlayManager) canUseKitty() bool {
 		return m.kittyOK
 	}
 	m.kittyTried = true
-	_, err := exec.LookPath("kitty")
-	m.kittyOK = err == nil
+	m.kittyOK = true
 	return m.kittyOK
 }
 
-func (m *imageOverlayManager) showWithKitty(path string, rect overlayRect) error {
-	args := []string{
-		"+kitten", "icat",
-		"--stdin=no",
-		"--transfer-mode=stream",
-		"--image-id=31337",
-		"--place", fmt.Sprintf("%dx%d@%dx%d", rect.width, rect.height, rect.x, rect.y),
-		"--scale-up",
-		"--no-trailing-newline",
-		path,
+func writeKittyEscape(control string, payload []byte) error {
+	if payload == nil {
+		_, err := fmt.Fprintf(os.Stdout, "\x1b_G%s\x1b\\", control)
+		return err
 	}
-	cmd := exec.Command("kitty", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = io.Discard
-	return cmd.Run()
+
+	encoded := base64.StdEncoding.EncodeToString(payload)
+	_, err := fmt.Fprintf(os.Stdout, "\x1b_G%s;%s\x1b\\", control, encoded)
+	return err
+}
+
+func resizeNearest(src image.Image, target image.Point) image.Image {
+	bounds := src.Bounds()
+	srcSize := bounds.Size()
+	if target.X <= 0 || target.Y <= 0 || srcSize.X <= target.X && srcSize.Y <= target.Y {
+		return src
+	}
+
+	dst := image.NewRGBA(image.Rect(0, 0, target.X, target.Y))
+	for y := 0; y < target.Y; y++ {
+		srcY := bounds.Min.Y + (y * srcSize.Y / target.Y)
+		for x := 0; x < target.X; x++ {
+			srcX := bounds.Min.X + (x * srcSize.X / target.X)
+			dst.Set(x, y, src.At(srcX, srcY))
+		}
+	}
+	return dst
+}
+
+func scaleImageToRect(img image.Image, rect overlayRect) image.Image {
+	size := img.Bounds().Size()
+	if size.X <= 0 || size.Y <= 0 || rect.width <= 0 || rect.height <= 0 {
+		return img
+	}
+
+	maxWidth := rect.width * kittyPixelsPerCell
+	maxHeight := rect.height * kittyPixelsPerCell
+	if maxWidth <= 0 || maxHeight <= 0 {
+		return img
+	}
+
+	scale := minFloat(float64(maxWidth)/float64(size.X), float64(maxHeight)/float64(size.Y))
+	if scale >= 1 {
+		return img
+	}
+
+	target := image.Point{
+		X: max(int(float64(size.X)*scale), 1),
+		Y: max(int(float64(size.Y)*scale), 1),
+	}
+	return resizeNearest(img, target)
+}
+
+func loadKittyPayload(path string, rect overlayRect) ([]byte, image.Point, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, image.Point{}, err
+	}
+	defer file.Close()
+
+	img, _, err := image.Decode(file)
+	if err != nil {
+		return nil, image.Point{}, err
+	}
+
+	img = scaleImageToRect(img, rect)
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, image.Point{}, err
+	}
+	return buf.Bytes(), img.Bounds().Size(), nil
+}
+
+func kittyPlacementControl(rect overlayRect, size image.Point) string {
+	if size.X <= 0 || size.Y <= 0 {
+		return fmt.Sprintf("a=T,f=100,t=d,i=%d,c=%d,C=1", kittyImageID, rect.width)
+	}
+
+	availableAspect := (float64(rect.width) * assumedCellAspect) / float64(rect.height)
+	imageAspect := float64(size.X) / float64(size.Y)
+	if imageAspect >= availableAspect {
+		return fmt.Sprintf("a=T,f=100,t=d,i=%d,c=%d,C=1", kittyImageID, rect.width)
+	}
+	return fmt.Sprintf("a=T,f=100,t=d,i=%d,r=%d,C=1", kittyImageID, rect.height)
+}
+
+func (m *imageOverlayManager) showWithKitty(path string, rect overlayRect) error {
+	data, size, err := loadKittyPayload(path, rect)
+	if err != nil {
+		return err
+	}
+
+	if err := writeKittyEscape(fmt.Sprintf("a=d,d=I,i=%d", kittyImageID), nil); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "\x1b7\x1b[%d;%dH", rect.y+1, rect.x+1); err != nil {
+		return err
+	}
+
+	const chunkSize = 4096
+	for offset := 0; offset < len(data); offset += chunkSize {
+		end := min(offset+chunkSize, len(data))
+		chunk := data[offset:end]
+		more := 0
+		if end < len(data) {
+			more = 1
+		}
+
+		control := fmt.Sprintf("m=%d", more)
+		if offset == 0 {
+			control = fmt.Sprintf("%s,m=%d", kittyPlacementControl(rect, size), more)
+		}
+		if err := writeKittyEscape(control, chunk); err != nil {
+			return err
+		}
+	}
+
+	_, err = fmt.Fprint(os.Stdout, "\x1b8")
+	return err
 }
 
 func (m *imageOverlayManager) clearKitty() {
-	cmd := exec.Command("kitty", "+kitten", "icat", "--stdin=no", "--clear")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = io.Discard
-	_ = cmd.Run()
+	_ = writeKittyEscape(fmt.Sprintf("a=d,d=I,i=%d", kittyImageID), nil)
 }
 
 func (m *imageOverlayManager) backendOutput() string {
