@@ -1473,6 +1473,8 @@ func renderStatus(m Model) string {
 
 func renderFooter(m Model) string {
 	parts := make([]string, 0, 8)
+	sep := lipgloss.NewStyle().Background(m.palette.Footer).Render("   ")
+	prefix := lipgloss.NewStyle().Background(m.palette.Footer).Render(" ")
 	for _, binding := range m.keys.ShortHelp() {
 		help := binding.Help()
 		if help.Key == "" || help.Desc == "" {
@@ -1489,18 +1491,19 @@ func renderFooter(m Model) string {
 			Render(" " + help.Desc)
 		parts = append(parts, keyView+descView)
 	}
-	line := strings.Join(parts, "   ")
+	line := strings.Join(parts, sep)
 	if m.selectMode {
 		modeLabel := lipgloss.NewStyle().
+			Background(m.palette.Footer).
 			Foreground(m.palette.Info).
 			Bold(true).
 			Render("SELECT TEXT MODE")
 		if line != "" {
-			line += "   "
+			line += sep
 		}
 		line += modeLabel
 	}
-	line = " " + line
+	line = prefix + line
 	line = ansi.Truncate(line, m.width, "")
 	fill := m.width - ansi.StringWidth(line)
 	if fill > 0 {
