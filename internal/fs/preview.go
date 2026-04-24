@@ -9,7 +9,6 @@ import (
 	_ "image/png"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -123,9 +122,7 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 		preview.Metadata.ImageFormat = format
 		preview.Metadata.ImageSize = dimensions
 		inline := renderImageInlinePreview(entry.Path, options.ImagePreviewWidth, options.ImagePreviewHeight)
-		if inline == "" {
-			preview.Body = "Image preview unavailable.\n\nInstall `chafa` for inline preview in info pane."
-		} else {
+		if inline != "" {
 			preview.Body = inline
 		}
 		preview.PlainBody = preview.Body
@@ -381,36 +378,7 @@ func previewIcon(entry Entry, useNerdIcons bool) string {
 }
 
 func renderImageInlinePreview(path string, width int, height int) string {
-	if width < 20 {
-		width = 20
-	}
-	if height < 8 {
-		height = 8
-	}
-
-	if _, err := exec.LookPath("chafa"); err != nil {
-		return ""
-	}
-
-	cmd := exec.Command(
-		"chafa",
-		"--format=symbols",
-		"--symbols=vhalf",
-		"--animate=off",
-		"--fg-only",
-		"--size", fmt.Sprintf("%dx%d", width, height),
-		path,
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-
-	view := strings.TrimSpace(string(out))
-	if view == "" {
-		return ""
-	}
-	return view
+	return ""
 }
 
 func detectImage(data []byte) (string, string, bool) {

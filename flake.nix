@@ -35,11 +35,6 @@
         package = pkgs.symlinkJoin {
           name = "vcom";
           paths = [ packageBase ];
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          postBuild = ''
-            wrapProgram "$out/bin/vcom" \
-              --prefix PATH : "${lib.makeBinPath [ pkgs.chafa ]}"
-          '';
         };
       in {
         packages.default = package;

@@ -147,6 +147,5 @@ Release artifacts:
 ## Notes
 
 - File creation time depends on filesystem/OS support; unavailable values are shown as `n/a`.
-- Image preview in info pane (`F9`) and image full-screen view (`F3`) use `chafa`.
 
 Architecture notes: [docs/architecture.md](/home/vrubel/projects/vcom/docs/architecture.md)

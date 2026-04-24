@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,6 +112,10 @@ type copyDoneMsg struct {
 }
 
 type dismissNoticeMsg struct{}
+type externalOpenMsg struct {
+	path string
+	err  error
+}
 
 type copyJobState struct {
 	id          int
@@ -410,6 +415,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modal.kind == modalNotice {
 			m.modal = modalState{}
 		}
+		return m, nil
+
+	case externalOpenMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Open failed: %v", msg.err)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Opened %s", filepath.Base(msg.path))
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1026,9 +1039,7 @@ func (m *Model) handleOpenExternal() (tea.Model, tea.Cmd) {
 
 	m.cleanupImageOverlay()
 	m.status = fmt.Sprintf("Opening %s with %s", selected.DisplayName(), name)
-	return m, tea.ExecProcess(command, func(err error) tea.Msg {
-		return opMsg{kind: opView, sourcePath: selected.Path, err: err}
-	})
+	return m, startExternalOpenCmd(command, selected.Path)
 }
 
 func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
@@ -2598,6 +2609,18 @@ func externalCommandFromEnv(envVars []string, fallbacks []string, path string) (
 	return exec.Command(parts[0], args...), filepath.Base(parts[0]), nil
 }
 
+func startExternalOpenCmd(command *exec.Cmd, path string) tea.Cmd {
+	return func() tea.Msg {
+		command.Stdin = nil
+		command.Stdout = io.Discard
+		command.Stderr = io.Discard
+		if err := command.Start(); err != nil {
+			return externalOpenMsg{path: path, err: err}
+		}
+		return externalOpenMsg{path: path}
+	}
+}
+
 func enableMouseCmd() tea.Cmd {
 	return func() tea.Msg {
 		return tea.EnableMouseCellMotion()
@@ -2753,11 +2776,21 @@ func (m Model) syncImageOverlay(leftWidth int, previewWidth int, bodyHeight int)
 		if m.active == PaneLeft {
 			startX = leftWidth + m.cfg.UI.PaneGap
 		}
+		innerWidth := max(previewWidth-2, 1)
+		metaHeight := 0
+		if m.cfg.Preview.ShowMetadata {
+			metaHeight = lipgloss.Height(renderMetadata(m.previewData.Metadata, m.palette, innerWidth))
+		}
+		titleHeight := 1
+		topInset := 1
+		contentBorder := 1
+		safetyGap := 1
+		contentTop := topInset + titleHeight + metaHeight + contentBorder + safetyGap
 		rect = overlayRect{
-			x:      startX + 2,
-			y:      9,
-			width:  max(previewWidth-4, 1),
-			height: max(bodyHeight-11, 1),
+			x:      startX + 3,
+			y:      contentTop,
+			width:  max(previewWidth-6, 1),
+			height: max(bodyHeight-contentTop-2, 1),
 		}
 	} else {
 		m.overlay.hide()

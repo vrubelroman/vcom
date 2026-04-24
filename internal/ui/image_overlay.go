@@ -89,7 +89,7 @@ func (m *imageOverlayManager) backendOutput() string {
 	case os.Getenv("DISPLAY") != "":
 		order = append(order, "x11")
 	}
-	order = append(order, "wayland", "x11", "sixel", "kitty", "chafa")
+	order = append(order, "wayland", "x11", "sixel", "kitty")
 
 	unique := make([]string, 0, len(order))
 	for _, backend := range order {
