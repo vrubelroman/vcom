@@ -142,6 +142,7 @@ type Model struct {
 	palette    theme.Palette
 	keys       KeyMap
 	nerdIcons  bool
+	overlay    *imageOverlayManager
 
 	width  int
 	height int
@@ -194,6 +195,7 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 		configPath:   configPath,
 		palette:      palette,
 		keys:         DefaultKeyMap(),
+		overlay:      newImageOverlayManager(),
 		left:         BrowserPane{ID: PaneLeft, Path: leftPath},
 		right:        BrowserPane{ID: PaneRight, Path: rightPath},
 		active:       PaneLeft,
@@ -438,6 +440,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			m.cleanupArchiveMounts()
+			m.cleanupImageOverlay()
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Help):
 			m.openHelpModal()
@@ -546,7 +549,13 @@ func (m Model) View() string {
 		Render("")
 
 	var panels string
-	if m.selectMode && m.infoMode {
+	if m.viewMode && m.previewData.Kind == vfs.PreviewKindImage {
+		panels = lipgloss.NewStyle().
+			Width(m.width).
+			Height(bodyHeight).
+			Background(m.palette.Background).
+			Render("")
+	} else if m.selectMode && m.infoMode {
 		panels = renderSelectionPane(m.previewData, &m.previewModel, m.palette, m.width, bodyHeight)
 	} else if m.infoMode {
 		if m.active == PaneLeft {
@@ -586,12 +595,17 @@ func (m Model) View() string {
 		Foreground(m.palette.Text).
 		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 	if m.modal.kind != modalNone {
+		if m.overlay != nil {
+			m.overlay.hide()
+		}
 		modalWidth := min(72, m.width-8)
 		if m.modal.kind == modalHelp {
 			modalWidth = min(96, m.width-8)
 		}
 		view = overlayCenter(view, renderModal(m, m.palette, modalWidth), m.width)
+		return view
 	}
+	m.syncImageOverlay(leftWidth, previewWidth, bodyHeight)
 	return view
 }
 
@@ -869,12 +883,6 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 		HumanReadableSize:     m.cfg.Browser.HumanReadableSize,
 		ThemeName:             m.cfg.UI.Theme,
 		UseNerdIcons:          m.nerdIcons,
-		ImagePreviewWidth:     max(m.previewModel.Width-2, 20),
-		ImagePreviewHeight:    max(m.previewModel.Height-6, 8),
-	}
-	if m.viewMode {
-		options.ImagePreviewWidth = max(m.width-8, 20)
-		options.ImagePreviewHeight = max(m.bodyHeight()-8, 8)
 	}
 
 	return func() tea.Msg {
@@ -976,12 +984,6 @@ func (m *Model) handleView() (tea.Model, tea.Cmd) {
 		m.status = "Select a file to view"
 		return m, nil
 	}
-	if selected.Category() == "image" {
-		if _, err := exec.LookPath("chafa"); err != nil {
-			m.status = "Install `chafa` to view images in terminal"
-			return m, nil
-		}
-	}
 	if m.viewMode {
 		return m.exitViewMode()
 	}
@@ -1022,6 +1024,7 @@ func (m *Model) handleOpenExternal() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m.cleanupImageOverlay()
 	m.status = fmt.Sprintf("Opening %s with %s", selected.DisplayName(), name)
 	return m, tea.ExecProcess(command, func(err error) tea.Msg {
 		return opMsg{kind: opView, sourcePath: selected.Path, err: err}
@@ -1041,6 +1044,7 @@ func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m.cleanupImageOverlay()
 	m.status = fmt.Sprintf("Opening %s with %s", selected.DisplayName(), name)
 	return m, tea.ExecProcess(command, func(err error) tea.Msg {
 		return opMsg{kind: opEdit, sourcePath: selected.Path, err: err}
@@ -2716,6 +2720,60 @@ func isEditableEntry(entry vfs.Entry) bool {
 
 func isArchiveEntry(entry vfs.Entry) bool {
 	return !entry.IsDir && !entry.IsParent && entry.Category() == "archive"
+}
+
+func (m Model) syncImageOverlay(leftWidth int, previewWidth int, bodyHeight int) {
+	if m.overlay == nil {
+		return
+	}
+	if m.modal.kind != modalNone {
+		m.overlay.hide()
+		return
+	}
+	if m.previewData.Kind != vfs.PreviewKindImage {
+		m.overlay.hide()
+		return
+	}
+	imagePath := strings.TrimSpace(m.previewData.Metadata.Path)
+	if imagePath == "" {
+		m.overlay.hide()
+		return
+	}
+
+	rect := overlayRect{}
+	if m.viewMode {
+		rect = overlayRect{
+			x:      1,
+			y:      1,
+			width:  max(m.width-2, 1),
+			height: max(bodyHeight-2, 1),
+		}
+	} else if m.infoMode {
+		startX := 0
+		if m.active == PaneLeft {
+			startX = leftWidth + m.cfg.UI.PaneGap
+		}
+		rect = overlayRect{
+			x:      startX + 2,
+			y:      9,
+			width:  max(previewWidth-4, 1),
+			height: max(bodyHeight-11, 1),
+		}
+	} else {
+		m.overlay.hide()
+		return
+	}
+
+	if err := m.overlay.show(imagePath, rect); err != nil {
+		m.overlay.hide()
+	}
+}
+
+func (m *Model) cleanupImageOverlay() {
+	if m.overlay == nil {
+		return
+	}
+	m.overlay.stop()
 }
 
 func (m *Model) hoverIndexFor(pane PaneID) int {
