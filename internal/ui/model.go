@@ -1501,12 +1501,14 @@ func renderFooter(m Model) string {
 		line += modeLabel
 	}
 	line = " " + line
-	return lipgloss.PlaceHorizontal(
-		m.width,
-		lipgloss.Left,
-		line,
-		lipgloss.WithWhitespaceBackground(m.palette.Footer),
-	)
+	line = ansi.Truncate(line, m.width, "")
+	fill := m.width - ansi.StringWidth(line)
+	if fill > 0 {
+		line += lipgloss.NewStyle().
+			Background(m.palette.Footer).
+			Render(strings.Repeat(" ", fill))
+	}
+	return line
 }
 
 func renderModal(m Model, palette theme.Palette, width int) string {
