@@ -143,11 +143,13 @@ type Model struct {
 	width  int
 	height int
 
-	left       BrowserPane
-	right      BrowserPane
-	active     PaneID
-	infoMode   bool
-	selectMode bool
+	left         BrowserPane
+	right        BrowserPane
+	active       PaneID
+	infoMode     bool
+	selectMode   bool
+	viewMode     bool
+	viewPrevInfo bool
 
 	previewModel viewport.Model
 	previewData  vfs.Preview
@@ -223,7 +225,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if selected, ok := m.activePane().Selected(); ok && selected.Path == msg.entryPath {
 			m.applyPreview(msg.preview)
 		}
-		if m.selectMode && msg.preview.Kind != vfs.PreviewKindText {
+		if m.selectMode && !m.viewMode && msg.preview.Kind != vfs.PreviewKindText {
 			m.selectMode = false
 			return m, enableMouseCmd()
 		}
@@ -394,6 +396,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modal.kind != modalNone {
 			return m.handleModalKey(msg)
 		}
+		if m.viewMode {
+			switch {
+			case key.Matches(msg, m.keys.View), key.Matches(msg, m.keys.Cancel), msg.String() == "q":
+				return m.exitViewMode()
+			case key.Matches(msg, m.keys.Up):
+				m.previewModel.LineUp(1)
+				return m, nil
+			case key.Matches(msg, m.keys.Down):
+				m.previewModel.LineDown(1)
+				return m, nil
+			case key.Matches(msg, m.keys.PageUp):
+				m.previewModel.LineUp(max(m.previewModel.Height-2, 1))
+				return m, nil
+			case key.Matches(msg, m.keys.PageDown):
+				m.previewModel.LineDown(max(m.previewModel.Height-2, 1))
+				return m, nil
+			default:
+				return m, nil
+			}
+		}
 
 		switch {
 		case key.Matches(msg, m.keys.Quit):
@@ -525,7 +547,7 @@ func (m Model) View() string {
 
 	parts := make([]string, 0, 3)
 	parts = append(parts, panels)
-	if m.cfg.UI.ShowFooter {
+	if m.cfg.UI.ShowFooter && !m.viewMode {
 		parts = append(parts, renderFooter(m))
 	}
 
@@ -871,20 +893,34 @@ func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 func (m *Model) handleView() (tea.Model, tea.Cmd) {
 	selected, ok := m.activePane().Selected()
 	if !ok || selected.IsParent || selected.IsDir {
-		m.status = "Preview refreshed"
-		return m, m.loadPreviewCmd()
+		m.status = "Select a file to view"
+		return m, nil
+	}
+	if m.viewMode {
+		return m.exitViewMode()
 	}
 
-	command, name, err := externalCommand("PAGER", []string{"less", "more"}, selected.Path)
-	if err != nil {
-		m.status = "Preview refreshed in center pane"
-		return m, m.loadPreviewCmd()
-	}
+	m.viewPrevInfo = m.infoMode
+	m.infoMode = true
+	m.selectMode = true
+	m.viewMode = true
+	m.resizePreview()
+	m.syncPreviewContent()
+	m.status = "View mode: F3/Esc/q to close"
+	return m, tea.Batch(m.loadPreviewCmd(), disableMouseCmd())
+}
 
-	m.status = fmt.Sprintf("Opening %s with %s", selected.DisplayName(), name)
-	return m, tea.ExecProcess(command, func(err error) tea.Msg {
-		return opMsg{kind: opView, sourcePath: selected.Path, err: err}
-	})
+func (m *Model) exitViewMode() (tea.Model, tea.Cmd) {
+	if !m.viewMode {
+		return m, nil
+	}
+	m.viewMode = false
+	m.selectMode = false
+	m.infoMode = m.viewPrevInfo
+	m.resizePreview()
+	m.syncPreviewContent()
+	m.status = "View mode: off"
+	return m, tea.Batch(m.loadPreviewCmd(), enableMouseCmd())
 }
 
 func (m *Model) handleOpenExternal() (tea.Model, tea.Cmd) {
@@ -926,6 +962,19 @@ func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.viewMode {
+		switch {
+		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
+			m.previewModel.LineUp(3)
+			return m, nil
+		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
+			m.previewModel.LineDown(3)
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
+
 	switch {
 	case msg.Action == tea.MouseActionMotion:
 		paneID, index, ok := m.mouseTarget(msg.X, msg.Y)
@@ -1033,6 +1082,10 @@ func (m *Model) toggleInfo() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) toggleSelectMode() (tea.Model, tea.Cmd) {
+	if m.viewMode {
+		m.status = "Close view mode first (F3/Esc/q)"
+		return m, nil
+	}
 	if m.selectMode {
 		m.selectMode = false
 		m.status = "Text selection mode: off"
@@ -1120,7 +1173,9 @@ func (m *Model) openHelpModal() {
 		"  r              refresh both panes",
 		"",
 		"View and Panels",
-		"  i              toggle preview/info pane",
+		"  F9 / i         toggle preview/info pane",
+		"  F3 / v         open read-only view mode",
+		"  F3 / Esc / q   close view mode",
 		"  Ctrl+t         toggle text selection mode in text preview",
 		"  Space          calculate selected directory size",
 		"  s              cycle sort mode",

@@ -38,7 +38,7 @@ func DefaultKeyMap() KeyMap {
 		Help:           key.NewBinding(key.WithKeys("f1", "?"), key.WithHelp("F1/?", "help")),
 		View:           key.NewBinding(key.WithKeys("f3", "v"), key.WithHelp("F3/v", "view")),
 		Edit:           key.NewBinding(key.WithKeys("f4", "e"), key.WithHelp("F4/e", "edit")),
-		Info:           key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "info")),
+		Info:           key.NewBinding(key.WithKeys("f9", "i"), key.WithHelp("F9/i", "info")),
 		SelectText:     key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("C-t", "text select")),
 		ToggleHidden:   key.NewBinding(key.WithKeys("."), key.WithHelp(".", "hidden")),
 		CycleTheme:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
@@ -67,7 +67,7 @@ func DefaultKeyMap() KeyMap {
 }
 
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Help, k.Copy, k.Move, k.Delete, k.Quit}
+	return []key.Binding{k.Help, k.View, k.Copy, k.Move, k.Delete, k.Info, k.Quit}
 }
 
 func (k KeyMap) FullHelp() [][]key.Binding {
