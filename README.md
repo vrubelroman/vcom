@@ -16,9 +16,11 @@ Preview mode (`F9` / `i`) temporarily replaces the inactive pane and shows:
 - image metadata (format + dimensions)
 - safe fallback for binary files
 
-## Screenshot
+## Screenshots
 
 ![vcom screenshot](docs/screen.png)
+![vcom screenshot 2](docs/screen2.png)
+![vcom screenshot 3](docs/screen3.png)
 
 ## Build and run
 
