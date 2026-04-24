@@ -35,6 +35,11 @@
         package = pkgs.symlinkJoin {
           name = "vcom";
           paths = [ packageBase ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram "$out/bin/vcom" \
+              --prefix PATH : "${lib.makeBinPath [ pkgs.ueberzugpp ]}"
+          '';
         };
       in {
         packages.default = package;

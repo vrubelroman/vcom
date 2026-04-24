@@ -29,6 +29,7 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: Roman Vrubel <roman@vrubel.dev>
+Depends: ueberzugpp
 Description: Terminal file manager inspired by Midnight Commander
  A two-pane terminal file manager with inspect mode and text previews.
 EOF

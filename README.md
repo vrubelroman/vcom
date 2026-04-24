@@ -73,6 +73,8 @@ Install into user profile:
 nix profile add github:vrubelroman/vcom?ref=v0.1.5
 ```
 
+The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works in non-`kitty` terminals out of the box.
+
 ### Debian / Ubuntu
 
 Download the release `.deb` for `v0.1.5`, then install:
@@ -80,6 +82,8 @@ Download the release `.deb` for `v0.1.5`, then install:
 ```bash
 sudo apt install ./vcom_0.1.5_amd64.deb
 ```
+
+The Debian package declares `ueberzugpp` as a dependency for image preview outside `kitty`.
 
 Install a Nerd Font (example):
 
@@ -99,6 +103,8 @@ A `PKGBUILD` is included in the repository:
 ```bash
 makepkg -si
 ```
+
+The Arch package depends on `ueberzugpp`, so non-`kitty` image preview is installed together with `vcom`.
 
 ## Configuration
 
