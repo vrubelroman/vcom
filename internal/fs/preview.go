@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/alecthomas/chroma/v2"
@@ -17,6 +19,8 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 )
+
+var sgrRegexp = regexp.MustCompile(`\x1b\[([0-9;:]*)m`)
 
 type PreviewKind string
 
@@ -159,7 +163,66 @@ func highlightText(path string, source string, themeName string) string {
 	if err := formatters.TTY16m.Format(&output, style, iterator); err != nil {
 		return source
 	}
-	return output.String()
+	return stripBackgroundSGR(output.String())
+}
+
+func stripBackgroundSGR(text string) string {
+	return sgrRegexp.ReplaceAllStringFunc(text, func(seq string) string {
+		matches := sgrRegexp.FindStringSubmatch(seq)
+		if len(matches) != 2 {
+			return seq
+		}
+		filtered := filterSGRParams(matches[1])
+		if filtered == "" {
+			return ""
+		}
+		return "\x1b[" + filtered + "m"
+	})
+}
+
+func filterSGRParams(paramString string) string {
+	if paramString == "" {
+		return ""
+	}
+
+	parts := strings.Split(paramString, ";")
+	kept := make([]string, 0, len(parts))
+
+	for i := 0; i < len(parts); i++ {
+		part := parts[i]
+		code, err := strconv.Atoi(part)
+		if err != nil {
+			kept = append(kept, part)
+			continue
+		}
+
+		if code == 49 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107) {
+			continue
+		}
+
+		if code == 48 {
+			// Skip explicit background color sequences:
+			// 48;5;n or 48;2;r;g;b
+			if i+1 < len(parts) {
+				mode, modeErr := strconv.Atoi(parts[i+1])
+				if modeErr == nil {
+					switch mode {
+					case 5:
+						i += 2
+						continue
+					case 2:
+						i += 4
+						continue
+					}
+				}
+			}
+			continue
+		}
+
+		kept = append(kept, part)
+	}
+
+	return strings.Join(kept, ";")
 }
 
 func chromaStyleName(themeName string) string {
