@@ -64,21 +64,21 @@ go build -o vcom ./cmd/vcom
 Run directly from the flake:
 
 ```bash
-nix run github:vrubelroman/vcom?ref=v0.1.3
+nix run github:vrubelroman/vcom?ref=v0.1.4
 ```
 
 Install into user profile:
 
 ```bash
-nix profile add github:vrubelroman/vcom?ref=v0.1.3
+nix profile add github:vrubelroman/vcom?ref=v0.1.4
 ```
 
 ### Debian / Ubuntu
 
-Download the release `.deb` for `v0.1.3`, then install:
+Download the release `.deb` for `v0.1.4`, then install:
 
 ```bash
-sudo apt install ./vcom_0.1.3_amd64.deb
+sudo apt install ./vcom_0.1.4_amd64.deb
 ```
 
 Install a Nerd Font (example):
@@ -130,7 +130,7 @@ Built-in themes:
 
 ## Releases
 
-Pushing a tag like `v0.1.3` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
+Pushing a tag like `v0.1.4` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
 
 - runs tests
 - vendors Go modules
@@ -140,9 +140,9 @@ Pushing a tag like `v0.1.3` triggers GitHub Actions release workflow (`.github/w
 
 Release artifacts:
 
-- `vcom-v0.1.3-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_0.1.3_amd64.deb`
-- `vcom-v0.1.3-checksums.txt`
+- `vcom-v0.1.4-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_0.1.4_amd64.deb`
+- `vcom-v0.1.4-checksums.txt`
 
 ## Notes
 

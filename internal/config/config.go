@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
@@ -247,12 +248,16 @@ func resolvePath(explicitPath string) (string, bool, error) {
 		}
 		if _, err := os.Stat(absPath); err == nil {
 			return absPath, true, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
+		} else if !isMissingPathError(err) {
 			return "", false, fmt.Errorf("stat %s: %w", absPath, err)
 		}
 	}
 
 	return "", false, nil
+}
+
+func isMissingPathError(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
 func DefaultUserPath() (string, error) {

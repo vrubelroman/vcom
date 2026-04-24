@@ -13,7 +13,7 @@
         lib = pkgs.lib;
         packageBase = pkgs.buildGoModule {
           pname = "vcom";
-          version = "0.1.3";
+          version = "0.1.4";
           src = ./.;
           vendorHash = null;
 
