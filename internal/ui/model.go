@@ -869,6 +869,12 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 		HumanReadableSize:     m.cfg.Browser.HumanReadableSize,
 		ThemeName:             m.cfg.UI.Theme,
 		UseNerdIcons:          m.nerdIcons,
+		ImagePreviewWidth:     max(m.previewModel.Width-2, 20),
+		ImagePreviewHeight:    max(m.previewModel.Height-6, 8),
+	}
+	if m.viewMode {
+		options.ImagePreviewWidth = max(m.width-8, 20)
+		options.ImagePreviewHeight = max(m.bodyHeight()-8, 8)
 	}
 
 	return func() tea.Msg {
@@ -969,6 +975,12 @@ func (m *Model) handleView() (tea.Model, tea.Cmd) {
 	if !ok || selected.IsParent || selected.IsDir {
 		m.status = "Select a file to view"
 		return m, nil
+	}
+	if selected.Category() == "image" {
+		if _, err := exec.LookPath("chafa"); err != nil {
+			m.status = "Install `chafa` to view images in terminal"
+			return m, nil
+		}
 	}
 	if m.viewMode {
 		return m.exitViewMode()
@@ -1287,7 +1299,7 @@ func (m *Model) openHelpModal() {
 		"",
 		"View and Panels",
 		"  F9 / i         toggle preview/info pane",
-		"  F3 / v         open read-only view mode",
+		"  F3 / v         text view mode or fullscreen image viewer",
 		"  F3 / Esc / q   close view mode",
 		"  Ctrl+t         toggle text selection mode in text preview",
 		"  Space          calculate selected directory size",

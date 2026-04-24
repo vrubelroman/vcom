@@ -23,6 +23,13 @@ You can force behavior in config:
 - `ui.icon_mode = "nerd"`: always use Nerd icons
 - `ui.icon_mode = "ascii"`: always use ASCII icons
 
+How to make terminal use the installed Nerd Font:
+
+- GNOME Terminal: `Preferences -> Profile -> Text -> Custom font` -> choose `JetBrainsMono Nerd Font`
+- Konsole: `Settings -> Edit Current Profile -> Appearance` -> choose a Nerd Font profile
+- Alacritty: set `font.normal.family: "JetBrainsMono Nerd Font"` in `~/.config/alacritty/alacritty.yml`
+- Kitty: set `font_family JetBrainsMono Nerd Font` in `~/.config/kitty/kitty.conf`
+
 Preview mode (`F9` / `i`) temporarily replaces the inactive pane and shows:
 
 - directory listing preview
@@ -57,21 +64,21 @@ go build -o vcom ./cmd/vcom
 Run directly from the flake:
 
 ```bash
-nix run github:vrubelroman/vcom?ref=v0.1.2
+nix run github:vrubelroman/vcom?ref=v0.1.3
 ```
 
 Install into user profile:
 
 ```bash
-nix profile add github:vrubelroman/vcom?ref=v0.1.2
+nix profile add github:vrubelroman/vcom?ref=v0.1.3
 ```
 
 ### Debian / Ubuntu
 
-Download the release `.deb` for `v0.1.2`, then install:
+Download the release `.deb` for `v0.1.3`, then install:
 
 ```bash
-sudo apt install ./vcom_0.1.2_amd64.deb
+sudo apt install ./vcom_0.1.3_amd64.deb
 ```
 
 Install a Nerd Font (example):
@@ -123,7 +130,7 @@ Built-in themes:
 
 ## Releases
 
-Pushing a tag like `v0.1.2` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
+Pushing a tag like `v0.1.3` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
 
 - runs tests
 - vendors Go modules
@@ -133,13 +140,13 @@ Pushing a tag like `v0.1.2` triggers GitHub Actions release workflow (`.github/w
 
 Release artifacts:
 
-- `vcom-v0.1.2-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_0.1.2_amd64.deb`
-- `vcom-v0.1.2-checksums.txt`
+- `vcom-v0.1.3-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_0.1.3_amd64.deb`
+- `vcom-v0.1.3-checksums.txt`
 
 ## Notes
 
 - File creation time depends on filesystem/OS support; unavailable values are shown as `n/a`.
-- Inline image rendering is intentionally disabled for now due to terminal compatibility differences.
+- Image preview in info pane (`F9`) and image full-screen view (`F3`) use `chafa`.
 
 Architecture notes: [docs/architecture.md](/home/vrubel/projects/vcom/docs/architecture.md)

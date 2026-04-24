@@ -9,6 +9,7 @@ import (
 	_ "image/png"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -65,6 +66,8 @@ type PreviewOptions struct {
 	HumanReadableSize     bool
 	ThemeName             string
 	UseNerdIcons          bool
+	ImagePreviewWidth     int
+	ImagePreviewHeight    int
 }
 
 func BuildPreview(entry Entry, options PreviewOptions) Preview {
@@ -119,12 +122,12 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 		preview.Kind = PreviewKindImage
 		preview.Metadata.ImageFormat = format
 		preview.Metadata.ImageSize = dimensions
-		preview.Body = fmt.Sprintf(
-			"Image preview is metadata-only for now.\n\nFormat: %s\nDimensions: %s\nPath: %s",
-			format,
-			dimensions,
-			entry.Path,
-		)
+		inline := renderImageInlinePreview(entry.Path, options.ImagePreviewWidth, options.ImagePreviewHeight)
+		if inline == "" {
+			preview.Body = "Image preview unavailable.\n\nInstall `chafa` for inline preview in info pane."
+		} else {
+			preview.Body = inline
+		}
 		preview.PlainBody = preview.Body
 		return preview
 	}
@@ -375,6 +378,39 @@ func previewIcon(entry Entry, useNerdIcons bool) string {
 	default:
 		return "󰈔"
 	}
+}
+
+func renderImageInlinePreview(path string, width int, height int) string {
+	if width < 20 {
+		width = 20
+	}
+	if height < 8 {
+		height = 8
+	}
+
+	if _, err := exec.LookPath("chafa"); err != nil {
+		return ""
+	}
+
+	cmd := exec.Command(
+		"chafa",
+		"--format=symbols",
+		"--symbols=vhalf",
+		"--animate=off",
+		"--fg-only",
+		"--size", fmt.Sprintf("%dx%d", width, height),
+		path,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	view := strings.TrimSpace(string(out))
+	if view == "" {
+		return ""
+	}
+	return view
 }
 
 func detectImage(data []byte) (string, string, bool) {

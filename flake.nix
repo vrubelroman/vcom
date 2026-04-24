@@ -11,9 +11,9 @@
       let
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
-        package = pkgs.buildGoModule {
+        packageBase = pkgs.buildGoModule {
           pname = "vcom";
-          version = "0.1.0";
+          version = "0.1.3";
           src = ./.;
           vendorHash = null;
 
@@ -31,6 +31,15 @@
             mainProgram = "vcom";
             platforms = platforms.linux;
           };
+        };
+        package = pkgs.symlinkJoin {
+          name = "vcom";
+          paths = [ packageBase ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram "$out/bin/vcom" \
+              --prefix PATH : "${lib.makeBinPath [ pkgs.chafa ]}"
+          '';
         };
       in {
         packages.default = package;
