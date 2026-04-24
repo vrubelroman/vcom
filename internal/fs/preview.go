@@ -21,6 +21,7 @@ import (
 )
 
 var sgrRegexp = regexp.MustCompile(`\x1b\[([0-9;:]*)m`)
+var sgrNumberRegexp = regexp.MustCompile(`\d+`)
 
 type PreviewKind string
 
@@ -158,12 +159,31 @@ func highlightText(path string, source string, themeName string) string {
 	if style == nil {
 		return source
 	}
+	style = styleWithoutBackground(style)
+	if style == nil {
+		return source
+	}
 
 	var output bytes.Buffer
 	if err := formatters.TTY16m.Format(&output, style, iterator); err != nil {
 		return source
 	}
 	return stripBackgroundSGR(output.String())
+}
+
+func styleWithoutBackground(base *chroma.Style) *chroma.Style {
+	if base == nil {
+		return nil
+	}
+	builder := base.Builder().Transform(func(entry chroma.StyleEntry) chroma.StyleEntry {
+		entry.Background = 0
+		return entry
+	})
+	stripped, err := builder.Build()
+	if err != nil {
+		return base
+	}
+	return stripped
 }
 
 func stripBackgroundSGR(text string) string {
@@ -185,41 +205,79 @@ func filterSGRParams(paramString string) string {
 		return ""
 	}
 
-	parts := strings.Split(paramString, ";")
-	kept := make([]string, 0, len(parts))
-
-	for i := 0; i < len(parts); i++ {
-		part := parts[i]
-		code, err := strconv.Atoi(part)
+	raw := sgrNumberRegexp.FindAllString(paramString, -1)
+	if len(raw) == 0 {
+		return ""
+	}
+	codes := make([]int, 0, len(raw))
+	for _, token := range raw {
+		value, err := strconv.Atoi(token)
 		if err != nil {
-			kept = append(kept, part)
+			continue
+		}
+		codes = append(codes, value)
+	}
+
+	kept := make([]string, 0, len(codes))
+	for i := 0; i < len(codes); i++ {
+		code := codes[i]
+
+		if code == 0 {
+			// Do not hard-reset background to terminal default.
+			// Reset common text attributes + foreground only.
+			kept = append(kept, "39", "22", "23", "24", "59")
 			continue
 		}
 
-		if code == 49 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107) {
+		if code == 49 || code == 7 || code == 27 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107) {
 			continue
 		}
 
-		if code == 48 {
-			// Skip explicit background color sequences:
-			// 48;5;n or 48;2;r;g;b
-			if i+1 < len(parts) {
-				mode, modeErr := strconv.Atoi(parts[i+1])
-				if modeErr == nil {
-					switch mode {
-					case 5:
-						i += 2
-						continue
-					case 2:
-						i += 4
-						continue
+		switch code {
+		case 48:
+			// Background color payloads:
+			// 48;5;n or 48;2;r;g;b (also appears in ':' form; parsed as the same int stream).
+			if i+1 < len(codes) {
+				mode := codes[i+1]
+				switch mode {
+				case 5:
+					i += 2
+				case 2:
+					i += 4
+				default:
+					i++
+				}
+			}
+			continue
+		case 38, 58:
+			// Preserve foreground (38) and underline color (58) payloads.
+			kept = append(kept, strconv.Itoa(code))
+			if i+1 < len(codes) {
+				mode := codes[i+1]
+				kept = append(kept, strconv.Itoa(mode))
+				switch mode {
+				case 5:
+					if i+2 < len(codes) {
+						kept = append(kept, strconv.Itoa(codes[i+2]))
 					}
+					i += 2
+				case 2:
+					if i+4 < len(codes) {
+						kept = append(kept,
+							strconv.Itoa(codes[i+2]),
+							strconv.Itoa(codes[i+3]),
+							strconv.Itoa(codes[i+4]),
+						)
+					}
+					i += 4
+				default:
+					i++
 				}
 			}
 			continue
 		}
 
-		kept = append(kept, part)
+		kept = append(kept, strconv.Itoa(code))
 	}
 
 	return strings.Join(kept, ";")

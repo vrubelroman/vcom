@@ -424,6 +424,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openHelpModal()
 			return m, nil
 		case key.Matches(msg, m.keys.Cancel):
+			if m.infoMode {
+				m.infoMode = false
+				m.selectMode = false
+				m.status = "Info pane closed"
+				return m, nil
+			}
 			if len(m.activePane().MarkedEntries()) > 0 {
 				m.activePane().ClearMarks()
 				m.status = "Selection cleared"
