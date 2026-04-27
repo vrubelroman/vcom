@@ -23,12 +23,54 @@ You can force behavior in config:
 - `ui.icon_mode = "nerd"`: always use Nerd icons
 - `ui.icon_mode = "ascii"`: always use ASCII icons
 
-How to make terminal use the installed Nerd Font:
+### Installing a Nerd Font
 
-- GNOME Terminal: `Preferences -> Profile -> Text -> Custom font` -> choose `JetBrainsMono Nerd Font`
-- Konsole: `Settings -> Edit Current Profile -> Appearance` -> choose a Nerd Font profile
-- Alacritty: set `font.normal.family: "JetBrainsMono Nerd Font"` in `~/.config/alacritty/alacritty.yml`
-- Kitty: set `font_family JetBrainsMono Nerd Font` in `~/.config/kitty/kitty.conf`
+**Ubuntu / Debian:**
+
+```bash
+wget -qO /tmp/JetBrainsMono.zip https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip
+mkdir -p ~/.local/share/fonts/JetBrainsMonoNerd
+unzip -o /tmp/JetBrainsMono.zip -d ~/.local/share/fonts/JetBrainsMonoNerd
+fc-cache -fv
+```
+
+**Arch Linux:**
+
+```bash
+sudo pacman -S ttf-jetbrains-mono-nerd
+```
+
+Or via AUR helper:
+
+```bash
+yay -S nerd-fonts-jetbrains-mono
+```
+
+**NixOS / Nix:**
+
+Add to your `/etc/nixos/configuration.nix`:
+
+```nix
+fonts.packages = with pkgs; [ nerd-fonts.jetbrains-mono ];
+```
+
+Or install imperatively:
+
+```bash
+nix profile install nixpkgs#nerd-fonts.jetbrains-mono
+```
+
+### Configuring terminal to use the installed Nerd Font
+
+After installing, set `JetBrainsMono Nerd Font` (or another Nerd Font) as the terminal font:
+
+- **GNOME Terminal:** `Preferences → Profile → Text → Custom font` → choose `JetBrainsMono Nerd Font`
+- **Konsole:** `Settings → Edit Current Profile → Appearance` → choose a Nerd Font profile
+- **Alacritty:** set `font.normal.family: "JetBrainsMono Nerd Font"` in `~/.config/alacritty/alacritty.yml`
+- **Kitty:** set `font_family JetBrainsMono Nerd Font` in `~/.config/kitty/kitty.conf`
+- **Foot:** set `font=JetBrainsMono Nerd Font:size=11` in `~/.config/foot/foot.ini`
+- **WezTerm:** set `font = wezterm.font("JetBrainsMono Nerd Font")` in `~/.config/wezterm/wezterm.lua`
+- **Windows Terminal:** `Settings → Profiles → Defaults → Appearance → Font face` → choose `JetBrainsMono Nerd Font`
 
 Preview mode (`F9` / `i`) temporarily replaces the inactive pane and shows:
 
@@ -64,37 +106,26 @@ go build -o vcom ./cmd/vcom
 Run directly from the flake:
 
 ```bash
-nix run github:vrubelroman/vcom?ref=v0.1.8
+nix run github:vrubelroman/vcom?ref=v0.1.9
 ```
 
 Install into user profile:
 
 ```bash
-nix profile add github:vrubelroman/vcom?ref=v0.1.8
+nix profile add github:vrubelroman/vcom?ref=v0.1.9
 ```
 
 The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works in non-`kitty` terminals out of the box.
 
 ### Debian / Ubuntu
 
-Download the release `.deb` for `v0.1.8`, then install:
+Download the release `.deb` for `v0.1.9`, then install:
 
 ```bash
-sudo apt install ./vcom_0.1.8_amd64.deb
+sudo apt install ./vcom_0.1.9_amd64.deb
 ```
 
 The Debian package declares `ueberzug` (or `ueberzugpp` where available) as a dependency for image preview outside `kitty`.
-
-Install a Nerd Font (example):
-
-```bash
-wget -qO /tmp/JetBrainsMono.zip https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip
-mkdir -p ~/.local/share/fonts/JetBrainsMonoNerd
-unzip -o /tmp/JetBrainsMono.zip -d ~/.local/share/fonts/JetBrainsMonoNerd
-fc-cache -fv
-```
-
-Then set your terminal font to a Nerd Font variant (for example, `JetBrainsMono Nerd Font`).
 
 ### Arch Linux
 
@@ -127,16 +158,29 @@ icon_mode = "auto" # auto | nerd | ascii
 
 ## Themes
 
-Built-in themes:
+Built-in themes (use `T` to cycle or set `ui.theme` in config):
 
 - `catppuccin-mocha` (default)
+- `catppuccin-lavender`
 - `tokyo-night`
 - `gruvbox-dark`
+- `gruvbox`
 - `nord-frost`
+- `nord`
+- `ayu-dark`
+- `breeze`
+- `cyberpunk`
+- `dracula`
+- `eldritch`
+- `kanagawa`
+- `kanagawa-paper`
+- `rose-pine`
+- `solarized-dark`
+- `vesper`
 
 ## Releases
 
-Pushing a tag like `v0.1.8` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
+Pushing a tag like `v0.1.9` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
 
 - runs tests
 - vendors Go modules
@@ -146,9 +190,9 @@ Pushing a tag like `v0.1.8` triggers GitHub Actions release workflow (`.github/w
 
 Release artifacts:
 
-- `vcom-v0.1.8-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_0.1.8_amd64.deb`
-- `vcom-v0.1.8-checksums.txt`
+- `vcom-v0.1.9-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_0.1.9_amd64.deb`
+- `vcom-v0.1.9-checksums.txt`
 
 ## Notes
 
