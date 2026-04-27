@@ -23,6 +23,8 @@ import (
 	"vcom/internal/theme"
 )
 
+const version = "v0.1.9"
+
 type modalKind int
 
 const (
@@ -1926,7 +1928,7 @@ func (m *Model) openHelpModal() {
 		kind:  modalHelp,
 		title: "Keyboard and Mouse Help",
 		body:  strings.Join(sections, "\n"),
-		note:  "F1/? or Esc to close",
+		note:  version + "  —  F1/? or Esc to close",
 	}
 	m.status = "Help opened"
 }
