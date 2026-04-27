@@ -116,14 +116,14 @@ func (e Entry) Category() string {
 		return "parent"
 	case e.IsDir:
 		return "directory"
-	case e.IsExecutable():
-		return "executable"
 	case hasExt(configExtensions, e.Extension):
 		return "config"
-	case hasExt(imageExtensions, e.Extension):
-		return "image"
 	case hasExt(textExtensions, e.Extension):
 		return "text"
+	case hasExt(textFilenames, strings.ToLower(e.Name)):
+		return "text"
+	case hasExt(imageExtensions, e.Extension):
+		return "image"
 	case hasExt(pdfExtensions, e.Extension):
 		return "pdf"
 	case hasExt(audioExtensions, e.Extension):
@@ -132,8 +132,8 @@ func (e Entry) Category() string {
 		return "video"
 	case hasExt(archiveExtensions, e.Extension):
 		return "archive"
-	case hasExt(textFilenames, strings.ToLower(e.Name)):
-		return "text"
+	case e.IsExecutable():
+		return "executable"
 	default:
 		return "binary"
 	}

@@ -23,7 +23,7 @@ import (
 	"vcom/internal/theme"
 )
 
-const version = "v0.2.0"
+const version = "v0.2.1"
 
 type modalKind int
 
@@ -51,6 +51,7 @@ const (
 	opEdit
 	opView
 	opArchive
+	opExecute
 )
 
 type pendingOperation struct {
@@ -353,6 +354,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case opView:
 			m.status = "Viewer closed"
 			return m, enableMouseCmd()
+		case opExecute:
+			m.status = "Executable closed"
+			return m, tea.Batch(m.loadPreviewCmd(), enableMouseCmd())
 		}
 
 		leftSelection := selectedName(&m.left)
@@ -1440,10 +1444,14 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 		return m, m.loadPreviewCmd()
 	}
 
-	if isEditableEntry(selected) {
+	switch selected.Category() {
+	case "text", "config":
 		return m.handleEdit()
+	case "executable":
+		return m.handleExecute(selected)
+	default:
+		return m.handleOpenExternal()
 	}
-	return m.handleOpenExternal()
 }
 
 func (m *Model) goParent() error {
@@ -1766,6 +1774,16 @@ func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
 	m.status = fmt.Sprintf("Opening %s with %s", selected.DisplayName(), name)
 	return m, tea.ExecProcess(command, func(err error) tea.Msg {
 		return opMsg{kind: opEdit, sourcePath: selected.Path, err: err}
+	})
+}
+
+func (m *Model) handleExecute(entry vfs.Entry) (tea.Model, tea.Cmd) {
+	m.cleanupImageOverlay()
+	cmd := exec.Command(entry.Path)
+	cmd.Dir = filepath.Dir(entry.Path)
+	m.status = fmt.Sprintf("Executing %s", entry.DisplayName())
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return opMsg{kind: opExecute, sourcePath: entry.Path, err: err}
 	})
 }
 
@@ -4242,7 +4260,7 @@ func paneIndexFromMouse(localY int, height int, pane *BrowserPane) (int, bool) {
 
 func isEditableEntry(entry vfs.Entry) bool {
 	switch entry.Category() {
-	case "text", "config", "executable":
+	case "text", "config":
 		return true
 	default:
 		return false
