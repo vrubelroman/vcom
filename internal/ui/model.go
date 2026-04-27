@@ -1886,7 +1886,20 @@ func (m *Model) renderTextCursorContent() string {
 		}
 		lines[idx] = marker + line
 	}
-	return strings.Join(lines, "\n")
+	result := strings.Join(lines, "\n")
+
+	// Replace full ANSI resets with background-preserving resets.
+	// lipgloss.Render() appends \x1b[0m which resets the panel background
+	// set by the outer renderPreviewContent wrapper. Instead, reset only
+	// foreground and text attributes, then restore the panel background
+	// so that gutter markers, cursor highlights, and selection highlights
+	// don't break the panel background for subsequent text on the line.
+	panelBG := lipgloss.NewStyle().Background(m.palette.Panel).Render("")
+	bgCode := strings.TrimSuffix(panelBG, "\x1b[0m")
+	inner := bgCode[2 : len(bgCode)-1]
+	safeReset := "\x1b[39;22;23;24;59;" + inner + "m"
+	result = strings.ReplaceAll(result, "\x1b[0m", safeReset)
+	return result
 }
 
 func (m *Model) moveTextCursorWordForward() {
