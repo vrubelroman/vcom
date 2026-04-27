@@ -9,6 +9,64 @@
 - Asynchronous copy/move with progress and background mode
 - Theme support and configurable layout/columns
 
+## Screenshots
+
+![vcom screenshot](docs/screen.png)
+![vcom screenshot 2](docs/screen2.png)
+![vcom screenshot 3](docs/screen3.png)
+
+## Build and run
+
+Run directly:
+
+```bash
+go run ./cmd/vcom
+```
+
+Build local binary:
+
+```bash
+go build -o vcom ./cmd/vcom
+```
+
+## Installation
+
+### NixOS / Nix
+
+Run directly from the flake:
+
+```bash
+nix run github:vrubelroman/vcom?ref=v0.1.9
+```
+
+Install into user profile:
+
+```bash
+nix profile add github:vrubelroman/vcom?ref=v0.1.9
+```
+
+The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works in non-`kitty` terminals out of the box.
+
+### Debian / Ubuntu
+
+Download the release `.deb` for `v0.1.9`, then install:
+
+```bash
+sudo apt install ./vcom_0.1.9_amd64.deb
+```
+
+The Debian package declares `ueberzug` (or `ueberzugpp` where available) as a dependency for image preview outside `kitty`.
+
+### Arch Linux
+
+A `PKGBUILD` is included in the repository:
+
+```bash
+makepkg -si
+```
+
+The Arch package depends on `ueberzugpp`, so non-`kitty` image preview is installed together with `vcom`.
+
 ## Font requirement (icons)
 
 For file icons, `vcom` expects a Nerd Font in your terminal profile.
@@ -78,64 +136,6 @@ Preview mode (`F9` / `i`) temporarily replaces the inactive pane and shows:
 - text file preview with syntax highlighting
 - image metadata (format + dimensions)
 - safe fallback for binary files
-
-## Screenshots
-
-![vcom screenshot](docs/screen.png)
-![vcom screenshot 2](docs/screen2.png)
-![vcom screenshot 3](docs/screen3.png)
-
-## Build and run
-
-Run directly:
-
-```bash
-go run ./cmd/vcom
-```
-
-Build local binary:
-
-```bash
-go build -o vcom ./cmd/vcom
-```
-
-## Installation
-
-### NixOS / Nix
-
-Run directly from the flake:
-
-```bash
-nix run github:vrubelroman/vcom?ref=v0.1.9
-```
-
-Install into user profile:
-
-```bash
-nix profile add github:vrubelroman/vcom?ref=v0.1.9
-```
-
-The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works in non-`kitty` terminals out of the box.
-
-### Debian / Ubuntu
-
-Download the release `.deb` for `v0.1.9`, then install:
-
-```bash
-sudo apt install ./vcom_0.1.9_amd64.deb
-```
-
-The Debian package declares `ueberzug` (or `ueberzugpp` where available) as a dependency for image preview outside `kitty`.
-
-### Arch Linux
-
-A `PKGBUILD` is included in the repository:
-
-```bash
-makepkg -si
-```
-
-The Arch package depends on `ueberzugpp`, so non-`kitty` image preview is installed together with `vcom`.
 
 ## Configuration
 
