@@ -53,6 +53,7 @@ type Preview struct {
 	Body      string
 	PlainBody string
 	Metadata  Metadata
+	Entries   []Entry
 }
 
 type PreviewOptions struct {
@@ -91,7 +92,7 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 		preview.Kind = PreviewKindDirectory
 		preview.Metadata.Size = entry.Size
 		preview.Metadata.SizeKnown = entry.DirSizeKnown
-		preview.Body = buildDirectoryPreview(entry.Path, options)
+		preview.Body, preview.Entries = buildDirectoryPreview(entry.Path, options)
 		preview.PlainBody = preview.Body
 		return preview
 	}
@@ -305,7 +306,7 @@ func chromaStyleName(themeName string) string {
 	}
 }
 
-func buildDirectoryPreview(path string, options PreviewOptions) string {
+func buildDirectoryPreview(path string, options PreviewOptions) (string, []Entry) {
 	entries, err := ListDir(path, ListOptions{
 		ShowHidden:  options.ShowHidden,
 		DirsFirst:   options.DirsFirst,
@@ -313,12 +314,15 @@ func buildDirectoryPreview(path string, options PreviewOptions) string {
 		SortReverse: options.SortReverse,
 	})
 	if err != nil {
-		return fmt.Sprintf("Could not list directory:\n\n%s", err)
+		return fmt.Sprintf("Could not list directory:\n\n%s", err), nil
 	}
 	if len(entries) == 0 {
-		return "Directory is empty."
+		return "Directory is empty.", nil
 	}
 
+	// Return all entries as-is for column-based rendering.
+	// The text body is still generated for terminals that don't support
+	// the rich rendering, and as a fallback.
 	var lines []string
 	for _, entry := range entries {
 		if entry.IsParent {
@@ -342,7 +346,7 @@ func buildDirectoryPreview(path string, options PreviewOptions) string {
 		}
 	}
 
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), entries
 }
 
 func previewIcon(entry Entry, useNerdIcons bool) string {

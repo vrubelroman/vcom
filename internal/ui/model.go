@@ -2363,7 +2363,18 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 	contentHeight := max(innerHeight-usedHeight, 3)
 	viewportModel.Width = max(innerWidth-2, 10)
 	viewportModel.Height = max(contentHeight-3, 1)
-	parts = append(parts, renderPreviewContent(viewportModel, palette, innerWidth, contentHeight))
+
+	// Directory previews: borrow the column layout from the browser pane
+	// (renderPaneRows + renderColumnsHeader at the same innerWidth),
+	// but non-interactive (no cursor, no selection).
+	if preview.Kind == vfs.PreviewKindDirectory && len(preview.Entries) > 0 {
+		dirPane := BrowserPane{Entries: preview.Entries}
+		headerRow := renderColumnsHeader(cfg, innerWidth, palette, palette.Panel, useNerdfont)
+		rows := renderPaneRows(dirPane, cfg, palette, innerWidth, contentHeight, false, -1, palette.Panel, useNerdfont)
+		parts = append(parts, lipgloss.JoinVertical(lipgloss.Left, headerRow, rows))
+	} else {
+		parts = append(parts, renderPreviewContent(viewportModel, palette, innerWidth, contentHeight))
+	}
 
 	content := lipgloss.NewStyle().
 		Width(innerWidth).
