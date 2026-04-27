@@ -286,14 +286,20 @@ func filterSGRParams(paramString string) string {
 
 func chromaStyleName(themeName string) string {
 	switch strings.ToLower(strings.TrimSpace(themeName)) {
-	case "catppuccin-mocha":
+	case "catppuccin-mocha", "catppuccin-lavender":
 		return "catppuccin-mocha"
 	case "tokyo-night":
 		return "tokyonight-night"
-	case "gruvbox-dark":
+	case "gruvbox-dark", "gruvbox":
 		return "gruvbox"
-	case "nord-frost":
+	case "nord-frost", "nord":
 		return "nord"
+	case "dracula":
+		return "dracula"
+	case "rose-pine":
+		return "rose-pine"
+	case "solarized-dark":
+		return "solarized-dark"
 	default:
 		return "catppuccin-mocha"
 	}
