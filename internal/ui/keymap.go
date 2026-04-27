@@ -24,6 +24,7 @@ type KeyMap struct {
 	Open           key.Binding
 	Back           key.Binding
 	Switch         key.Binding
+	Filter         key.Binding
 	Refresh        key.Binding
 	DirSize        key.Binding
 	Copy           key.Binding
@@ -57,6 +58,7 @@ func DefaultKeyMap() KeyMap {
 		SelectDown:     key.NewBinding(key.WithKeys("shift+down", "J"), key.WithHelp("S-↓/J", "select down")),
 		PageUp:         key.NewBinding(key.WithKeys("pgup"), key.WithHelp("PgUp", "page up")),
 		PageDown:       key.NewBinding(),
+		Filter:         key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Open:           key.NewBinding(key.WithKeys("enter", "right"), key.WithHelp("Enter", "open")),
 		Back:           key.NewBinding(key.WithKeys("backspace", "left"), key.WithHelp("←", "parent")),
 		Switch:         key.NewBinding(key.WithKeys("tab", "h", "l"), key.WithHelp("Tab/h/l", "switch pane")),

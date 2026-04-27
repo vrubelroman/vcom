@@ -205,6 +205,10 @@ type Model struct {
 	previewModel viewport.Model
 	previewData  vfs.Preview
 
+	filterMode  bool
+	filterQuery string
+	filterInput textinput.Model
+
 	modal  modalState
 	status string
 	busy   bool
@@ -262,6 +266,12 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 	if model.status == "" {
 		model.status = "Ready"
 	}
+
+	filterInput := textinput.New()
+	filterInput.Placeholder = "filter by name…"
+	filterInput.CharLimit = 64
+	filterInput.Width = 40
+	model.filterInput = filterInput
 
 	model.previewModel = viewport.New(0, 0)
 	if err := model.reloadPane(PaneLeft, ""); err != nil {
@@ -728,6 +738,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Filter mode: route keys to the filter input
+		if m.filterMode {
+			switch {
+			case msg.String() == "esc":
+				m.filterQuery = ""
+				m.filterInput.SetValue("")
+				m.filterInput.Blur()
+				m.filterMode = false
+				m.status = "Filter cleared"
+				return m, nil
+			case key.Matches(msg, m.keys.Confirm):
+				m.filterMode = false
+				m.filterInput.Blur()
+				m.status = fmt.Sprintf("Filter: %s", m.filterQuery)
+				return m, nil
+			case key.Matches(msg, m.keys.Up):
+				m.moveCursor(-1)
+				return m, m.loadPreviewCmd()
+			case key.Matches(msg, m.keys.Down):
+				m.moveCursor(1)
+				return m, m.loadPreviewCmd()
+			case key.Matches(msg, m.keys.PageUp):
+				m.moveCursor(-max(m.bodyHeight()-6, 5))
+				return m, m.loadPreviewCmd()
+			case key.Matches(msg, m.keys.PageDown):
+				m.moveCursor(max(m.bodyHeight()-6, 5))
+				return m, m.loadPreviewCmd()
+			default:
+				var cmd tea.Cmd
+				m.filterInput, cmd = m.filterInput.Update(msg)
+				m.filterQuery = m.filterInput.Value()
+				m.adjustCursorForFilter()
+				return m, cmd
+			}
+		}
+
+		// Toggle filter mode
+		if key.Matches(msg, m.keys.Filter) {
+			m.filterMode = true
+			m.filterInput.Focus()
+			m.filterInput.SetValue(m.filterQuery)
+			m.status = "Filter: type to filter, Enter to confirm, Esc to clear"
+			return m, nil
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			m.cleanupArchiveMounts()
@@ -851,6 +906,10 @@ func (m Model) View() string {
 		Background(m.palette.Panel).
 		Render("")
 
+	// Use filtered panes when a filter query is active.
+	leftPane := m.filteredPane(m.left)
+	rightPane := m.filteredPane(m.right)
+
 	var panels string
 	if m.viewMode && m.previewData.Kind == vfs.PreviewKindImage {
 		panels = lipgloss.NewStyle().
@@ -868,7 +927,7 @@ func (m Model) View() string {
 		if m.active == PaneLeft {
 			panels = lipgloss.JoinHorizontal(
 				lipgloss.Top,
-				renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, true, m.hoverIndexFor(PaneLeft), m.nerdIcons),
+				renderPane(leftPane, m.cfg, m.palette, leftWidth, bodyHeight, true, m.hoverIndexFor(PaneLeft), m.nerdIcons),
 				gap,
 				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight, m.nerdIcons),
 			)
@@ -877,20 +936,23 @@ func (m Model) View() string {
 				lipgloss.Top,
 				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight, m.nerdIcons),
 				gap,
-				renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, true, m.hoverIndexFor(PaneRight), m.nerdIcons),
+				renderPane(rightPane, m.cfg, m.palette, rightWidth, bodyHeight, true, m.hoverIndexFor(PaneRight), m.nerdIcons),
 			)
 		}
 	} else {
 		panels = lipgloss.JoinHorizontal(
 			lipgloss.Top,
-			renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, m.active == PaneLeft, m.hoverIndexFor(PaneLeft), m.nerdIcons),
+			renderPane(leftPane, m.cfg, m.palette, leftWidth, bodyHeight, m.active == PaneLeft, m.hoverIndexFor(PaneLeft), m.nerdIcons),
 			gap,
-			renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, m.active == PaneRight, m.hoverIndexFor(PaneRight), m.nerdIcons),
+			renderPane(rightPane, m.cfg, m.palette, rightWidth, bodyHeight, m.active == PaneRight, m.hoverIndexFor(PaneRight), m.nerdIcons),
 		)
 	}
 
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	parts = append(parts, panels)
+	if m.filterMode {
+		parts = append(parts, renderFilterBar(m))
+	}
 	if m.cfg.UI.ShowFooter && !m.viewMode {
 		parts = append(parts, renderFooter(m))
 	}
@@ -1120,6 +1182,59 @@ func (m *Model) moveCursor(delta int) {
 	m.hover = hoverState{}
 }
 
+// adjustCursorForFilter ensures the cursor stays within bounds of the
+// filtered entry list. Called after each filter keystroke.
+func (m *Model) adjustCursorForFilter() {
+	pane := m.activePane()
+	if m.filterQuery == "" {
+		return
+	}
+	count := m.filteredCount(pane)
+	if pane.Cursor >= count {
+		pane.Cursor = max(count-1, 0)
+	}
+	if pane.Offset > pane.Cursor {
+		pane.Offset = pane.Cursor
+	}
+}
+
+// filteredCount returns the number of entries matching the current filter.
+func (m *Model) filteredCount(pane *BrowserPane) int {
+	if m.filterQuery == "" {
+		return len(pane.Entries)
+	}
+	query := strings.ToLower(m.filterQuery)
+	count := 0
+	for _, entry := range pane.Entries {
+		if strings.Contains(strings.ToLower(entry.DisplayName()), query) {
+			count++
+		}
+	}
+	return count
+}
+
+// filteredPane returns a copy of the pane with entries filtered by the current query.
+func (m Model) filteredPane(pane BrowserPane) BrowserPane {
+	if m.filterQuery == "" {
+		return pane
+	}
+	query := strings.ToLower(m.filterQuery)
+	filtered := make([]vfs.Entry, 0, len(pane.Entries))
+	for _, entry := range pane.Entries {
+		if entry.IsParent || strings.Contains(strings.ToLower(entry.DisplayName()), query) {
+			filtered = append(filtered, entry)
+		}
+	}
+	pane.Entries = filtered
+	if pane.Cursor >= len(filtered) {
+		pane.Cursor = max(len(filtered)-1, 0)
+	}
+	if pane.Offset > pane.Cursor {
+		pane.Offset = pane.Cursor
+	}
+	return pane
+}
+
 func (m *Model) selectMoveCursor(delta int) {
 	pane := m.activePane()
 	if selected, ok := pane.Selected(); ok && !selected.IsParent {
@@ -1177,6 +1292,13 @@ func (m *Model) enterSelected() error {
 	return nil
 }
 
+func (m *Model) clearFilter() {
+	m.filterQuery = ""
+	m.filterInput.SetValue("")
+	m.filterInput.Blur()
+	m.filterMode = false
+}
+
 func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 	selected, ok := m.activePane().Selected()
 	if !ok {
@@ -1184,6 +1306,7 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 	}
 
 	if selected.IsDir {
+		m.clearFilter()
 		if err := m.enterSelected(); err != nil {
 			m.status = err.Error()
 			return m, nil
@@ -1192,6 +1315,7 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 	}
 
 	if isArchiveEntry(selected) {
+		m.clearFilter()
 		if err := m.enterArchive(selected); err != nil {
 			m.status = err.Error()
 			return m, nil
@@ -1207,6 +1331,7 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 
 func (m *Model) goParent() error {
 	m.hover = hoverState{}
+	m.clearFilter()
 	pane := m.activePane()
 
 	if mount, ok := pane.CurrentArchive(); ok {
@@ -2566,6 +2691,34 @@ func renderFooter(m Model) string {
 		line += modeLabel
 	}
 	line = prefix + line
+	line = ansi.Truncate(line, m.width, "")
+	fill := m.width - ansi.StringWidth(line)
+	if fill > 0 {
+		line += lipgloss.NewStyle().
+			Background(m.palette.Footer).
+			Render(strings.Repeat(" ", fill))
+	}
+	return line
+}
+
+func renderFilterBar(m Model) string {
+	prompt := lipgloss.NewStyle().
+		Background(m.palette.Footer).
+		Foreground(m.palette.FooterKey).
+		Bold(true).
+		Render(" / ")
+	inputView := m.filterInput.View()
+	inputStyle := lipgloss.NewStyle().
+		Background(m.palette.Footer).
+		Foreground(m.palette.Text)
+	line := prompt + inputStyle.Render(inputView)
+	filtered := m.filteredCount(m.activePane())
+	if m.filterQuery != "" {
+		countStyle := lipgloss.NewStyle().
+			Background(m.palette.Footer).
+			Foreground(m.palette.Muted)
+		line += countStyle.Render(fmt.Sprintf(" (%d)", filtered))
+	}
 	line = ansi.Truncate(line, m.width, "")
 	fill := m.width - ansi.StringWidth(line)
 	if fill > 0 {
