@@ -27,6 +27,9 @@ type BrowserPane struct {
 	Offset  int
 	Marked  map[string]struct{}
 	Archive []ArchiveMount
+
+	dirHistory []string
+	dirFuture  []string
 }
 
 type ArchiveMount struct {
@@ -182,6 +185,57 @@ func (p *BrowserPane) EnsureVisible(pageSize int) {
 
 func (p *BrowserPane) InArchive() bool {
 	return len(p.Archive) > 0
+}
+
+// PushHistory saves the current path to the back-stack and clears the forward-stack.
+func (p *BrowserPane) PushHistory(path string) {
+	p.dirHistory = append(p.dirHistory, path)
+	p.dirFuture = nil
+}
+
+// PopHistory returns the most recent path from the back-stack.
+func (p *BrowserPane) PopHistory() (string, bool) {
+	if len(p.dirHistory) == 0 {
+		return "", false
+	}
+	path := p.dirHistory[len(p.dirHistory)-1]
+	p.dirHistory = p.dirHistory[:len(p.dirHistory)-1]
+	return path, true
+}
+
+// PushFuture saves the current path to the forward-stack.
+func (p *BrowserPane) PushFuture(path string) {
+	p.dirFuture = append(p.dirFuture, path)
+}
+
+// PopFuture returns the most recent path from the forward-stack.
+func (p *BrowserPane) PopFuture() (string, bool) {
+	if len(p.dirFuture) == 0 {
+		return "", false
+	}
+	path := p.dirFuture[len(p.dirFuture)-1]
+	p.dirFuture = p.dirFuture[:len(p.dirFuture)-1]
+	return path, true
+}
+
+// HasHistory returns true if there are entries in the back-stack.
+func (p *BrowserPane) HasHistory() bool {
+	return len(p.dirHistory) > 0
+}
+
+// HasFuture returns true if there are entries in the forward-stack.
+func (p *BrowserPane) HasFuture() bool {
+	return len(p.dirFuture) > 0
+}
+
+// HistoryDepth returns the number of entries in the back-stack.
+func (p *BrowserPane) HistoryDepth() int {
+	return len(p.dirHistory)
+}
+
+// FutureDepth returns the number of entries in the forward-stack.
+func (p *BrowserPane) FutureDepth() int {
+	return len(p.dirFuture)
 }
 
 func (p *BrowserPane) PushArchive(mount ArchiveMount) {

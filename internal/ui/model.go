@@ -205,9 +205,10 @@ type Model struct {
 	previewModel viewport.Model
 	previewData  vfs.Preview
 
-	filterMode  bool
-	filterQuery string
-	filterInput textinput.Model
+	filterMode   bool
+	filterQuery  string
+	filterInput  textinput.Model
+	filterPaneID PaneID
 
 	modal  modalState
 	status string
@@ -754,29 +755,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = fmt.Sprintf("Filter: %s", m.filterQuery)
 				return m, nil
 			case key.Matches(msg, m.keys.Up):
-				m.moveCursor(-1)
+				m.moveFilteredCursor(-1)
 				return m, m.loadPreviewCmd()
 			case key.Matches(msg, m.keys.Down):
-				m.moveCursor(1)
+				m.moveFilteredCursor(1)
 				return m, m.loadPreviewCmd()
 			case key.Matches(msg, m.keys.PageUp):
-				m.moveCursor(-max(m.bodyHeight()-6, 5))
+				m.moveFilteredCursor(-max(m.bodyHeight()-6, 5))
 				return m, m.loadPreviewCmd()
 			case key.Matches(msg, m.keys.PageDown):
-				m.moveCursor(max(m.bodyHeight()-6, 5))
+				m.moveFilteredCursor(max(m.bodyHeight()-6, 5))
 				return m, m.loadPreviewCmd()
 			default:
 				var cmd tea.Cmd
 				m.filterInput, cmd = m.filterInput.Update(msg)
 				m.filterQuery = m.filterInput.Value()
-				m.adjustCursorForFilter()
+				m.snapFilterCursor()
 				return m, cmd
 			}
 		}
 
-		// Toggle filter mode
+		// Toggle filter mode — attaches filter to the currently active pane
 		if key.Matches(msg, m.keys.Filter) {
 			m.filterMode = true
+			m.filterPaneID = m.active
 			m.filterInput.Focus()
 			m.filterInput.SetValue(m.filterQuery)
 			m.status = "Filter: type to filter, Enter to confirm, Esc to clear"
@@ -795,6 +797,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openRenameModal()
 			return m, nil
 		case key.Matches(msg, m.keys.Cancel), msg.String() == "q":
+			// Esc on the pane where filter is active clears it.
+			if m.filterQuery != "" && m.filterPaneID == m.active {
+				m.clearFilter()
+				m.status = "Filter cleared"
+				return m, nil
+			}
 			if m.infoMode {
 				m.infoMode = false
 				m.selectMode = false
@@ -868,6 +876,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = err.Error()
 			}
 			return m, m.loadPreviewCmd()
+		case key.Matches(msg, m.keys.HistoryBack):
+			return m.historyBack()
+		case key.Matches(msg, m.keys.HistoryForward):
+			return m.historyForward()
 		case key.Matches(msg, m.keys.Refresh):
 			return m.refreshAllPanes("Refreshed")
 		case key.Matches(msg, m.keys.DirSize):
@@ -906,9 +918,18 @@ func (m Model) View() string {
 		Background(m.palette.Panel).
 		Render("")
 
-	// Use filtered panes when a filter query is active.
-	leftPane := m.filteredPane(m.left)
-	rightPane := m.filteredPane(m.right)
+	// Filter is sticky: once activated on a pane it stays on that pane
+	// even after switching to the other pane with Tab.
+	leftPane := m.left
+	rightPane := m.right
+	if m.filterQuery != "" {
+		switch m.filterPaneID {
+		case PaneLeft:
+			leftPane = m.filteredPane(m.left)
+		case PaneRight:
+			rightPane = m.filteredPane(m.right)
+		}
+	}
 
 	var panels string
 	if m.viewMode && m.previewData.Kind == vfs.PreviewKindImage {
@@ -1177,24 +1198,84 @@ func (m *Model) refreshAllPanes(status string) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) moveCursor(delta int) {
+	// When a filter query is active on this pane, move through filtered entries
+	// only, so the cursor always lands on a matching item.
+	if m.filterQuery != "" && m.filterPaneID == m.active {
+		m.moveFilteredCursor(delta)
+		return
+	}
 	pane := m.activePane()
 	pane.Move(delta, max(m.bodyHeight()-4, 1))
 	m.hover = hoverState{}
 }
 
-// adjustCursorForFilter ensures the cursor stays within bounds of the
-// filtered entry list. Called after each filter keystroke.
-func (m *Model) adjustCursorForFilter() {
+// snapFilterCursor moves the real cursor to the nearest entry matching the
+// current filter query. Called after each filter keystroke so the user
+// always sees a selected item in the filtered view.
+func (m *Model) snapFilterCursor() {
 	pane := m.activePane()
-	if m.filterQuery == "" {
+	if m.filterQuery == "" || len(pane.Entries) == 0 {
 		return
 	}
-	count := m.filteredCount(pane)
-	if pane.Cursor >= count {
-		pane.Cursor = max(count-1, 0)
+	query := strings.ToLower(m.filterQuery)
+
+	// If current cursor position already matches, keep it.
+	if pane.Cursor >= 0 && pane.Cursor < len(pane.Entries) {
+		entry := pane.Entries[pane.Cursor]
+		if entry.IsParent || strings.Contains(strings.ToLower(entry.DisplayName()), query) {
+			return
+		}
 	}
-	if pane.Offset > pane.Cursor {
-		pane.Offset = pane.Cursor
+
+	// Search forward from cursor.
+	for i := pane.Cursor + 1; i < len(pane.Entries); i++ {
+		entry := pane.Entries[i]
+		if entry.IsParent || strings.Contains(strings.ToLower(entry.DisplayName()), query) {
+			pane.Cursor = i
+			return
+		}
+	}
+
+	// Search backward from cursor.
+	for i := pane.Cursor - 1; i >= 0; i-- {
+		entry := pane.Entries[i]
+		if entry.IsParent || strings.Contains(strings.ToLower(entry.DisplayName()), query) {
+			pane.Cursor = i
+			return
+		}
+	}
+}
+
+// moveFilteredCursor moves the real cursor to the next/prev entry matching
+// the current filter query. Used for Up/Down navigation in filter mode.
+func (m *Model) moveFilteredCursor(delta int) {
+	pane := m.activePane()
+	if m.filterQuery == "" || len(pane.Entries) == 0 {
+		m.moveCursor(delta)
+		return
+	}
+	query := strings.ToLower(m.filterQuery)
+	maxIdx := len(pane.Entries) - 1
+
+	idx := pane.Cursor + delta
+	for idx >= 0 && idx <= maxIdx {
+		entry := pane.Entries[idx]
+		if entry.IsParent || strings.Contains(strings.ToLower(entry.DisplayName()), query) {
+			pane.Cursor = idx
+			pageSize := max(m.bodyHeight()-4, 1)
+			if pane.Cursor < pane.Offset {
+				pane.Offset = pane.Cursor
+			}
+			if pageSize > 0 && pane.Cursor >= pane.Offset+pageSize {
+				pane.Offset = pane.Cursor - pageSize + 1
+			}
+			if pane.Offset < 0 {
+				pane.Offset = 0
+			}
+			m.hover = hoverState{}
+			return
+		}
+		idx += delta
 	}
 }
 
@@ -1214,24 +1295,40 @@ func (m *Model) filteredCount(pane *BrowserPane) int {
 }
 
 // filteredPane returns a copy of the pane with entries filtered by the current query.
+// The cursor in the returned copy reflects the position of the real cursor
+// within the filtered subset, so Selected() on the original pane still returns
+// the correct entry.  Offset is recomputed in filtered-entry space so the
+// viewport does not inherit the real-list offset (which would be out of range).
 func (m Model) filteredPane(pane BrowserPane) BrowserPane {
 	if m.filterQuery == "" {
 		return pane
 	}
 	query := strings.ToLower(m.filterQuery)
 	filtered := make([]vfs.Entry, 0, len(pane.Entries))
-	for _, entry := range pane.Entries {
+	filteredCursor := 0
+	for i, entry := range pane.Entries {
 		if entry.IsParent || strings.Contains(strings.ToLower(entry.DisplayName()), query) {
+			if i == pane.Cursor {
+				filteredCursor = len(filtered)
+			}
 			filtered = append(filtered, entry)
 		}
 	}
 	pane.Entries = filtered
+	pane.Cursor = filteredCursor
 	if pane.Cursor >= len(filtered) {
 		pane.Cursor = max(len(filtered)-1, 0)
 	}
-	if pane.Offset > pane.Cursor {
-		pane.Offset = pane.Cursor
+
+	// Recompute offset in filtered-entry space.  The source offset is in
+	// real-entry-index space and is meaningless for the shorter filtered list.
+	pageSize := max(m.bodyHeight()-4, 1)
+	offset := 0
+	if pane.Cursor >= pageSize {
+		offset = pane.Cursor - pageSize + 1
 	}
+	pane.Offset = offset
+
 	return pane
 }
 
@@ -1240,7 +1337,11 @@ func (m *Model) selectMoveCursor(delta int) {
 	if selected, ok := pane.Selected(); ok && !selected.IsParent {
 		pane.ToggleMarked(selected.Path)
 	}
-	pane.Move(delta, max(m.bodyHeight()-4, 1))
+	if m.filterQuery != "" && m.filterPaneID == m.active {
+		m.moveFilteredCursor(delta)
+	} else {
+		pane.Move(delta, max(m.bodyHeight()-4, 1))
+	}
 	m.hover = hoverState{}
 }
 
@@ -1283,6 +1384,8 @@ func (m *Model) enterSelected() error {
 			return m.goParent()
 		}
 	}
+	// Save current directory to history before navigating.
+	pane.PushHistory(pane.Path)
 	currentName := selected.Name
 	pane.Path = selected.Path
 	if err := m.reloadPane(pane.ID, currentName); err != nil {
@@ -1297,6 +1400,7 @@ func (m *Model) clearFilter() {
 	m.filterInput.SetValue("")
 	m.filterInput.Blur()
 	m.filterMode = false
+	m.filterPaneID = ""
 }
 
 func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
@@ -1306,7 +1410,6 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 	}
 
 	if selected.IsDir {
-		m.clearFilter()
 		if err := m.enterSelected(); err != nil {
 			m.status = err.Error()
 			return m, nil
@@ -1315,7 +1418,6 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 	}
 
 	if isArchiveEntry(selected) {
-		m.clearFilter()
 		if err := m.enterArchive(selected); err != nil {
 			m.status = err.Error()
 			return m, nil
@@ -1331,7 +1433,6 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 
 func (m *Model) goParent() error {
 	m.hover = hoverState{}
-	m.clearFilter()
 	pane := m.activePane()
 
 	if mount, ok := pane.CurrentArchive(); ok {
@@ -1339,6 +1440,8 @@ func (m *Model) goParent() error {
 		current := filepath.Clean(pane.Path)
 		if current == root {
 			// At archive root — pop archive and return to the directory containing it
+			// Save current path to history before leaving so forward can restore it.
+			pane.PushHistory(pane.Path)
 			if _, popped := pane.PopArchive(); popped {
 				_ = os.RemoveAll(mount.TempDir)
 			}
@@ -1350,6 +1453,7 @@ func (m *Model) goParent() error {
 			return nil
 		}
 		// Inside archive subdirectory — go up one level within the archive
+		pane.PushHistory(pane.Path)
 		parent := filepath.Dir(current)
 		pane.Path = parent
 		if err := m.reloadPane(pane.ID, filepath.Base(current)); err != nil {
@@ -1363,6 +1467,7 @@ func (m *Model) goParent() error {
 	if parent == pane.Path {
 		return nil
 	}
+	pane.PushHistory(pane.Path)
 	currentName := filepath.Base(pane.Path)
 	pane.Path = parent
 	if err := m.reloadPane(pane.ID, currentName); err != nil {
@@ -1370,6 +1475,48 @@ func (m *Model) goParent() error {
 	}
 	m.status = fmt.Sprintf("Moved to %s", parent)
 	return nil
+}
+
+// historyBack navigates the active pane to the previous directory in its history.
+func (m *Model) historyBack() (tea.Model, tea.Cmd) {
+	pane := m.activePane()
+	prevPath, ok := pane.PopHistory()
+	if !ok {
+		m.status = "No directory history"
+		return m, nil
+	}
+	// Save current path to forward-stack so forward navigation can restore it.
+	pane.PushFuture(pane.Path)
+	pane.Path = prevPath
+	pane.Cursor = 0
+	pane.Offset = 0
+	if err := m.reloadPane(pane.ID, ""); err != nil {
+		m.status = err.Error()
+		return m, nil
+	}
+	m.status = fmt.Sprintf("History back to %s", prevPath)
+	return m, m.loadPreviewCmd()
+}
+
+// historyForward navigates the active pane to the next directory in its forward-stack.
+func (m *Model) historyForward() (tea.Model, tea.Cmd) {
+	pane := m.activePane()
+	nextPath, ok := pane.PopFuture()
+	if !ok {
+		m.status = "No forward history"
+		return m, nil
+	}
+	// Save current path to back-stack so back navigation can restore it.
+	pane.PushHistory(pane.Path)
+	pane.Path = nextPath
+	pane.Cursor = 0
+	pane.Offset = 0
+	if err := m.reloadPane(pane.ID, ""); err != nil {
+		m.status = err.Error()
+		return m, nil
+	}
+	m.status = fmt.Sprintf("History forward to %s", nextPath)
+	return m, m.loadPreviewCmd()
 }
 
 func (m Model) loadPreviewCmd() tea.Cmd {
@@ -2013,20 +2160,20 @@ func (m *Model) openHelpModal() {
 		"  Enter / Right  open selected entry",
 		"  Backspace/Left  go to parent directory",
 		"  Tab / h / l    switch active pane",
-		"  F2 / r         rename selected entry",
+		"  Alt+Left       directory history back",
+		"  Alt+Right      directory history forward",
+		"  /              filter entries by name in current pane",
 		"  Ctrl+r         refresh both panes",
 		"",
 		"View and Panels",
-		"  F9 / o         toggle preview/info pane",
-		"  F3             plain text view or fullscreen image viewer",
+		"  o              toggle preview/info pane",
 		"  i              show text caret in preview pane",
 		"  v              start visual selection from caret",
-		"  F3 / Esc / q   close view mode",
+		"  Esc / q        close view/info/caret mode",
 		"  yy             copy current line in caret mode",
 		"  y              copy visual selection to clipboard",
 		"  h / l          move caret left/right",
 		"  w / b          move caret by word",
-		"  q / Esc        close caret/info mode",
 		"  Ctrl+t         mouse selection mode in text preview pane",
 		"  Space          calculate selected directory size",
 		"  s              cycle sort mode",
@@ -2034,11 +2181,11 @@ func (m *Model) openHelpModal() {
 		"  t              cycle theme",
 		"",
 		"Dialogs and Transfers",
+		"  r              rename selected entry",
 		"  Enter / y      confirm action",
 		"  Esc / n        cancel action",
 		"  b              run copy/move in background (progress dialog)",
 		"  c              cancel active copy/move transfer",
-		"  F5/F6/F8       apply to marked entries when selection exists",
 		"",
 		"Mouse",
 		"  Left click     select entry and activate pane",
@@ -2046,7 +2193,7 @@ func (m *Model) openHelpModal() {
 		"  Right click    toggle preview/info mode for clicked entry",
 		"  Wheel          scroll list or preview area",
 		"",
-		"F-key actions are shown in the footer.",
+		"F1–F10 actions are shown in the footer.",
 	}
 
 	m.modal = modalState{
@@ -3428,6 +3575,8 @@ func copyPlanCmd(kind fileOpKind, sourcePaths []string, targetDir string, overwr
 
 func (m *Model) enterArchive(selected vfs.Entry) error {
 	pane := m.activePane()
+	// Save current path to history before opening the archive.
+	pane.PushHistory(pane.Path)
 	tempDir, err := vfs.ExtractArchiveToTemp(selected.Path)
 	if err != nil {
 		return err

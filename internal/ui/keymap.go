@@ -36,6 +36,8 @@ type KeyMap struct {
 	ProgressCancel key.Binding
 	Cancel         key.Binding
 	Quit           key.Binding
+	HistoryBack    key.Binding
+	HistoryForward key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -71,6 +73,8 @@ func DefaultKeyMap() KeyMap {
 		Confirm:        key.NewBinding(key.WithKeys("enter", "y"), key.WithHelp("Enter/y", "confirm")),
 		Background:     key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "background")),
 		ProgressCancel: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "cancel transfer")),
+		HistoryBack:    key.NewBinding(key.WithKeys("alt+left"), key.WithHelp("A-←", "back")),
+		HistoryForward: key.NewBinding(key.WithKeys("alt+right"), key.WithHelp("A-→", "forward")),
 		Cancel:         key.NewBinding(key.WithKeys("esc"), key.WithHelp("Esc", "cancel")),
 		Quit:           key.NewBinding(key.WithKeys("f10", "q", "ctrl+c"), key.WithHelp("F10/q", "quit")),
 	}
