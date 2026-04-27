@@ -33,6 +33,8 @@ const (
 	modalCopyProgress
 	modalNotice
 	modalHelp
+	modalArchiveType
+	modalArchiveProgress
 )
 
 type fileOpKind int
@@ -45,6 +47,7 @@ const (
 	opRename
 	opEdit
 	opView
+	opArchive
 )
 
 type pendingOperation struct {
@@ -104,6 +107,25 @@ type deletePlanMsg struct {
 	err         error
 }
 
+type archivePlanMsg struct {
+	sourcePaths []string
+	targetDir   string
+	stats       vfs.TransferStats
+	err         error
+}
+
+type archiveProgressMsg struct {
+	jobID    int
+	progress vfs.CopyProgress
+}
+
+type archiveDoneMsg struct {
+	jobID       int
+	sourcePaths []string
+	targetPath  string
+	err         error
+}
+
 type copyDoneMsg struct {
 	jobID       int
 	kind        fileOpKind
@@ -126,6 +148,16 @@ type copyJobState struct {
 	targetDir   string
 	progress    vfs.CopyProgress
 	overwrite   bool
+	background  bool
+	cancel      context.CancelFunc
+	startedAt   time.Time
+}
+
+type archiveJobState struct {
+	id          int
+	sourcePaths []string
+	targetPath  string
+	progress    vfs.CopyProgress
 	background  bool
 	cancel      context.CancelFunc
 	startedAt   time.Time
@@ -184,6 +216,11 @@ type Model struct {
 	nextCopyJob  int
 	copyProgress chan tea.Msg
 	copyPath     string
+
+	archiveJob      *archiveJobState
+	nextArchiveJob  int
+	archiveProgress chan tea.Msg
+	archiveFormat   string
 }
 
 func NewModel(cfg config.Config, configPath string) (Model, error) {
@@ -207,16 +244,17 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 	}
 
 	model := Model{
-		cfg:          cfg,
-		configPath:   configPath,
-		palette:      palette,
-		keys:         DefaultKeyMap(),
-		overlay:      newImageOverlayManager(),
-		left:         BrowserPane{ID: PaneLeft, Path: leftPath},
-		right:        BrowserPane{ID: PaneRight, Path: rightPath},
-		active:       PaneLeft,
-		status:       "Ready",
-		copyProgress: make(chan tea.Msg, 256),
+		cfg:             cfg,
+		configPath:      configPath,
+		palette:         palette,
+		keys:            DefaultKeyMap(),
+		overlay:         newImageOverlayManager(),
+		left:            BrowserPane{ID: PaneLeft, Path: leftPath},
+		right:           BrowserPane{ID: PaneRight, Path: rightPath},
+		active:          PaneLeft,
+		status:          "Ready",
+		copyProgress:    make(chan tea.Msg, 256),
+		archiveProgress: make(chan tea.Msg, 256),
 	}
 	model.nerdIcons, model.status = resolveIconMode(cfg.UI.IconMode)
 	if model.status == "" {
@@ -362,6 +400,95 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			},
 		)
 		return m, nil
+
+	case archivePlanMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+
+		m.archiveFormat = "zip"
+		bodyLines := []string{
+			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
+			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
+			fmt.Sprintf("Size:  %s", formatSize(msg.stats.BytesTotal, true)),
+		}
+		m.modal = modalState{
+			kind:  modalArchiveType,
+			title: "Archive selected files?",
+			body:  strings.Join(bodyLines, "\n"),
+			note: fmt.Sprintf(
+				"Format: %s  (f to change)\nEnter / y to confirm, Esc / n to cancel",
+				m.archiveFormat,
+			),
+			pending: &pendingOperation{
+				kind:        opArchive,
+				sourcePaths: append([]string(nil), msg.sourcePaths...),
+				targetDir:   msg.targetDir,
+				stats:       msg.stats,
+			},
+		}
+		return m, nil
+
+	case archiveProgressMsg:
+		if m.archiveJob == nil || msg.jobID != m.archiveJob.id {
+			return m, nil
+		}
+		m.archiveJob.progress = msg.progress
+		if m.archiveJob.background {
+			m.status = formatArchiveStatus(msg.progress)
+		}
+		return m, waitArchiveProgressCmd(m.archiveProgress)
+
+	case archiveDoneMsg:
+		if m.archiveJob == nil || msg.jobID != m.archiveJob.id {
+			return m, nil
+		}
+
+		m.busy = false
+		if msg.err != nil {
+			activeSelection := selectedName(m.activePane())
+			_ = m.reloadPane(PaneLeft, activeSelection)
+			_ = m.reloadPane(PaneRight, activeSelection)
+			if msg.err == context.Canceled {
+				m.status = "Archiving cancelled"
+			} else {
+				m.status = fmt.Sprintf("Archiving failed: %v", msg.err)
+			}
+			m.archiveJob = nil
+			if m.modal.kind == modalArchiveProgress {
+				m.modal = modalState{}
+			}
+			return m, m.loadPreviewCmd()
+		}
+
+		m.status = fmt.Sprintf("Archived %d entr%s to %s", len(msg.sourcePaths), pluralSuffix(len(msg.sourcePaths), "y", "ies"), msg.targetPath)
+		activeSelection := selectedName(m.activePane())
+		_ = m.reloadPane(PaneLeft, activeSelection)
+		_ = m.reloadPane(PaneRight, activeSelection)
+		background := m.archiveJob.background
+		sourceCount := len(m.archiveJob.sourcePaths)
+		m.archiveJob = nil
+		m.activePane().ClearMarks()
+
+		cmd := m.loadPreviewCmd()
+		if m.modal.kind == modalArchiveProgress {
+			m.modal = modalState{}
+		}
+		if background {
+			doneBody := fmt.Sprintf("%d entr%s archived successfully.", sourceCount, pluralSuffix(sourceCount, "y", "ies"))
+			if sourceCount == 1 && len(msg.sourcePaths) == 1 {
+				doneBody = filepath.Base(msg.sourcePaths[0]) + " archived successfully."
+			}
+			m.modal = modalState{
+				kind:  modalNotice,
+				title: "Archive complete",
+				body:  doneBody,
+				note:  "Press Esc to close",
+			}
+		}
+		return m, cmd
 
 	case copyProgressMsg:
 		if m.copyJob == nil || msg.jobID != m.copyJob.id {
@@ -637,6 +764,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Edit):
 			return m.handleEdit()
+		case key.Matches(msg, m.keys.Archive):
+			return m.handleArchive()
 		case key.Matches(msg, m.keys.Info):
 			return m.toggleInfo()
 		case key.Matches(msg, m.keys.SelectText):
@@ -847,6 +976,67 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, pending.cmd()
 		}
 
+	case modalArchiveType:
+		switch {
+		case isModalCloseKey(msg, m.keys):
+			m.modal = modalState{}
+			m.status = "Cancelled"
+			return m, nil
+		case key.Matches(msg, m.keys.Confirm):
+			if m.modal.pending == nil {
+				m.modal = modalState{}
+				m.status = "Nothing to confirm"
+				return m, nil
+			}
+			pending := *m.modal.pending
+			m.modal = modalState{}
+			if m.archiveJob != nil {
+				m.status = "Archive is already running"
+				return m, nil
+			}
+			m.busy = true
+			return m, m.startArchiveJob(pending.sourcePaths, pending.targetDir, m.archiveFormat, pending.stats)
+		case msg.String() == "f":
+			switch m.archiveFormat {
+			case "zip":
+				m.archiveFormat = "tar"
+			case "tar":
+				m.archiveFormat = "tar.gz"
+			default:
+				m.archiveFormat = "zip"
+			}
+			m.modal.note = fmt.Sprintf(
+				"Format: %s  (f to change)\nEnter / y to confirm, Esc / n to cancel",
+				m.archiveFormat,
+			)
+			return m, nil
+		}
+		return m, nil
+
+	case modalArchiveProgress:
+		if key.Matches(msg, m.keys.Background) {
+			if m.archiveJob == nil {
+				m.modal = modalState{}
+				return m, nil
+			}
+			m.archiveJob.background = true
+			m.modal = modalState{}
+			m.status = "Archive continues in background"
+			return m, nil
+		}
+		if key.Matches(msg, m.keys.ProgressCancel) {
+			if m.archiveJob == nil {
+				m.modal = modalState{}
+				return m, nil
+			}
+			if m.archiveJob.cancel != nil {
+				m.archiveJob.cancel()
+			}
+			m.status = "Archiving cancelling..."
+			return m, nil
+		}
+		return m, nil
+
 	case modalCopyProgress:
 		if key.Matches(msg, m.keys.Background) {
 			if m.copyJob == nil {
@@ -968,6 +1158,14 @@ func (m *Model) enterSelected() error {
 		m.status = "File is shown in the middle pane. Use F3 for pager or F4 for editor."
 		return nil
 	}
+	// When inside an archive mount and selecting "..", use archive-aware
+	// navigation (goParent) instead of blindly setting pane.Path to the
+	// parent directory (which would be /tmp for a temp-mounted archive).
+	if selected.IsParent {
+		if _, archiveMounted := pane.CurrentArchive(); archiveMounted {
+			return m.goParent()
+		}
+	}
 	currentName := selected.Name
 	pane.Path = selected.Path
 	if err := m.reloadPane(pane.ID, currentName); err != nil {
@@ -1009,15 +1207,28 @@ func (m *Model) goParent() error {
 	m.hover = hoverState{}
 	pane := m.activePane()
 
-	if mount, ok := pane.CurrentArchive(); ok && pane.Path == mount.RootPath {
-		if _, popped := pane.PopArchive(); popped {
-			_ = os.RemoveAll(mount.TempDir)
+	if mount, ok := pane.CurrentArchive(); ok {
+		root := filepath.Clean(mount.RootPath)
+		current := filepath.Clean(pane.Path)
+		if current == root {
+			// At archive root — pop archive and return to the directory containing it
+			if _, popped := pane.PopArchive(); popped {
+				_ = os.RemoveAll(mount.TempDir)
+			}
+			pane.Path = mount.ParentPath
+			if err := m.reloadPane(pane.ID, filepath.Base(mount.SourcePath)); err != nil {
+				return err
+			}
+			m.status = fmt.Sprintf("Closed archive %s", filepath.Base(mount.SourcePath))
+			return nil
 		}
-		pane.Path = mount.ParentPath
-		if err := m.reloadPane(pane.ID, filepath.Base(mount.SourcePath)); err != nil {
+		// Inside archive subdirectory — go up one level within the archive
+		parent := filepath.Dir(current)
+		pane.Path = parent
+		if err := m.reloadPane(pane.ID, filepath.Base(current)); err != nil {
 			return err
 		}
-		m.status = fmt.Sprintf("Closed archive %s", filepath.Base(mount.SourcePath))
+		m.status = fmt.Sprintf("Moved to %s", parent)
 		return nil
 	}
 
@@ -1130,6 +1341,23 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 		return m, copyPlanCmd(kind, sources, targetDir, overwrite, existingTargets)
 	}
 	return m, nil
+}
+
+func (m *Model) handleArchive() (tea.Model, tea.Cmd) {
+	sources := m.operationSources()
+	if len(sources) == 0 {
+		m.status = "Nothing to archive"
+		return m, nil
+	}
+
+	if m.archiveJob != nil {
+		m.status = "Archive is already running"
+		return m, nil
+	}
+
+	m.busy = true
+	m.status = "Calculating archive size"
+	return m, archivePlanCmd(sources, m.passivePane().Path)
 }
 
 func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
@@ -2339,6 +2567,9 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 	if m.modal.kind == modalCopyProgress && m.copyJob != nil {
 		return renderCopyProgressModal(*m.copyJob, palette, width)
 	}
+	if m.modal.kind == modalArchiveProgress && m.archiveJob != nil {
+		return renderArchiveProgressModal(*m.archiveJob, palette, width)
+	}
 	if m.modal.kind == modalHelp {
 		return renderHelpModal(m.modal, palette, width)
 	}
@@ -2703,6 +2934,54 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 	return box.Render(strings.Join(lines, "\n"))
 }
 
+func renderArchiveProgressModal(job archiveJobState, palette theme.Palette, width int) string {
+	outerWidth := max(width, 8)
+	contentWidth := max(outerWidth-6, 1)
+	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
+	mutedStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
+	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
+
+	box := lipgloss.NewStyle().
+		Width(contentWidth).
+		Padding(1, 2).
+		Background(palette.Panel).
+		Foreground(palette.Text).
+		BorderStyle(lipgloss.DoubleBorder()).
+		BorderForeground(palette.BorderActive).
+		BorderBackground(palette.Panel)
+
+	progress := job.progress
+	ratio := 0.0
+	if progress.BytesTotal > 0 {
+		ratio = float64(progress.BytesDone) / float64(progress.BytesTotal)
+	}
+
+	stage := progress.Stage
+	if stage == "" {
+		stage = "Archiving data"
+	}
+
+	lines := []string{
+		titleStyle.Render("Archiving"),
+		spacer,
+		renderProgressBarLine(ratio, contentWidth, palette),
+		spacer,
+		renderProgressPercentLine(ratio, contentWidth, palette),
+		renderProgressStatLine("Stage:", stage, contentWidth, palette),
+		spacer,
+		renderProgressStatLine("Files:", fmt.Sprintf("%d / %d", progress.FilesDone, progress.FilesTotal), contentWidth, palette),
+		renderProgressStatLine("Size:", fmt.Sprintf("%s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true)), contentWidth, palette),
+		renderProgressStatLine("Speed:", transferSpeed(progress.BytesDone, job.startedAt), contentWidth, palette),
+		spacer,
+		renderModalNoteLine("Background / b, Cancel / c", contentWidth, palette, mutedStyle),
+	}
+	if job.background {
+		lines = append(lines, mutedStyle.Render("Archive continues in background"))
+	}
+
+	return box.Render(strings.Join(lines, "\n"))
+}
+
 func renderProgressBar(ratio float64, width int, palette theme.Palette) string {
 	if width < 10 {
 		width = 10
@@ -2994,6 +3273,8 @@ func (m *Model) enterArchive(selected vfs.Entry) error {
 		TempDir:    tempDir,
 	})
 	pane.Path = tempDir
+	pane.Cursor = 0
+	pane.Offset = 0
 	if err := m.reloadPane(pane.ID, ""); err != nil {
 		_ = os.RemoveAll(tempDir)
 		_, _ = pane.PopArchive()
@@ -3032,7 +3313,35 @@ func deletePlanCmd(sourcePaths []string) tea.Cmd {
 	}
 }
 
+func archivePlanCmd(sourcePaths []string, targetDir string) tea.Cmd {
+	return func() tea.Msg {
+		stats := vfs.TransferStats{}
+		var err error
+		for _, sourcePath := range sourcePaths {
+			part, statErr := vfs.CopyStats(sourcePath)
+			if statErr != nil {
+				err = statErr
+				break
+			}
+			stats.FilesTotal += part.FilesTotal
+			stats.BytesTotal += part.BytesTotal
+		}
+		return archivePlanMsg{
+			sourcePaths: append([]string(nil), sourcePaths...),
+			targetDir:   targetDir,
+			stats:       stats,
+			err:         err,
+		}
+	}
+}
+
 func waitCopyProgressCmd(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
+}
+
+func waitArchiveProgressCmd(ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		return <-ch
 	}
@@ -3135,6 +3444,62 @@ func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir st
 	)
 }
 
+func (m *Model) startArchiveJob(sourcePaths []string, targetDir string, format string, stats vfs.TransferStats) tea.Cmd {
+	m.nextArchiveJob++
+	jobID := m.nextArchiveJob
+	ctx, cancel := context.WithCancel(context.Background())
+
+	archiveName := vfs.ArchiveName(sourcePaths, format)
+	archivePath := filepath.Join(targetDir, archiveName)
+
+	m.archiveJob = &archiveJobState{
+		id:          jobID,
+		sourcePaths: append([]string(nil), sourcePaths...),
+		targetPath:  archivePath,
+		progress: vfs.CopyProgress{
+			FilesDone:   0,
+			FilesTotal:  stats.FilesTotal,
+			BytesDone:   0,
+			BytesTotal:  stats.BytesTotal,
+			CurrentPath: sourcePaths[0],
+		},
+		cancel:    cancel,
+		startedAt: time.Now(),
+	}
+	m.modal = modalState{kind: modalArchiveProgress}
+	m.status = "Archiving started"
+
+	return tea.Batch(
+		func() tea.Msg {
+			go func() {
+				emitProgress := func(p vfs.CopyProgress) {
+					m.archiveProgress <- archiveProgressMsg{
+						jobID:    jobID,
+						progress: p,
+					}
+				}
+				err := vfs.CreateArchive(ctx, sourcePaths, archivePath, emitProgress)
+				if err != nil {
+					m.archiveProgress <- archiveDoneMsg{
+						jobID:       jobID,
+						sourcePaths: append([]string(nil), sourcePaths...),
+						targetPath:  archivePath,
+						err:         err,
+					}
+					return
+				}
+				m.archiveProgress <- archiveDoneMsg{
+					jobID:       jobID,
+					sourcePaths: append([]string(nil), sourcePaths...),
+					targetPath:  archivePath,
+				}
+			}()
+			return nil
+		},
+		waitArchiveProgressCmd(m.archiveProgress),
+	)
+}
+
 func moveCmd(sourcePath, targetDir string, overwrite bool) tea.Cmd {
 	return func() tea.Msg {
 		targetPath, err := vfs.MovePath(sourcePath, targetDir, overwrite)
@@ -3207,6 +3572,16 @@ func formatCopyStatus(kind fileOpKind, progress vfs.CopyProgress) string {
 	)
 }
 
+func formatArchiveStatus(progress vfs.CopyProgress) string {
+	return fmt.Sprintf(
+		"Archiving in background: %d/%d files, %s/%s",
+		progress.FilesDone,
+		progress.FilesTotal,
+		formatSize(progress.BytesDone, true),
+		formatSize(progress.BytesTotal, true),
+	)
+}
+
 func transferSourceLabel(paths []string) string {
 	if len(paths) == 0 {
 		return "n/a"
@@ -3228,6 +3603,8 @@ func progressTitle(kind fileOpKind) string {
 	switch kind {
 	case opMove:
 		return "Moving"
+	case opArchive:
+		return "Archiving"
 	default:
 		return "Copying"
 	}
@@ -3241,6 +3618,8 @@ func operationDoneLabel(kind fileOpKind) string {
 		return "Copied"
 	case opDelete:
 		return "Deleted"
+	case opArchive:
+		return "Archived"
 	default:
 		return "Done"
 	}
@@ -3254,6 +3633,8 @@ func operationVerb(kind fileOpKind) string {
 		return "move"
 	case opDelete:
 		return "delete"
+	case opArchive:
+		return "archive"
 	default:
 		return "operate on"
 	}
