@@ -262,6 +262,65 @@ func DeletePath(path string) error {
 	return os.RemoveAll(path)
 }
 
+// MoveToTrash moves a file or directory to the FreeDesktop Trash directory
+// (~/.local/share/Trash). Follows the FreeDesktop Trash specification:
+//   - The original item is moved to Trash/files/<basename>
+//   - A .trashinfo file is written to Trash/info/<basename>.trashinfo
+//   - If <basename> already exists in Trash/files, a numeric suffix is appended.
+func MoveToTrash(path string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	trashDir := filepath.Join(home, ".local", "share", "Trash")
+	filesDir := filepath.Join(trashDir, "files")
+	infoDir := filepath.Join(trashDir, "info")
+
+	if err := os.MkdirAll(filesDir, 0o700); err != nil {
+		return fmt.Errorf("cannot create trash files directory: %w", err)
+	}
+	if err := os.MkdirAll(infoDir, 0o700); err != nil {
+		return fmt.Errorf("cannot create trash info directory: %w", err)
+	}
+
+	baseName := filepath.Base(path)
+
+	// Generate a unique name in the trash directory
+	destName := baseName
+	for counter := 1; ; counter++ {
+		destPath := filepath.Join(filesDir, destName)
+		if _, err := os.Stat(destPath); os.IsNotExist(err) {
+			break
+		} else if err != nil {
+			return fmt.Errorf("cannot stat trash path: %w", err)
+		}
+		destName = fmt.Sprintf("%s.%d", baseName, counter)
+	}
+
+	destPath := filepath.Join(filesDir, destName)
+	if err := os.Rename(path, destPath); err != nil {
+		// Cross-filesystem move: fall back to copy+delete
+		return fmt.Errorf("cannot move to trash: %w", err)
+	}
+
+	// Write .trashinfo file
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		absPath = path
+	}
+	now := time.Now().Format("2006-01-02T15:04:05")
+	infoContent := fmt.Sprintf("[Trash Info]\nPath=%s\nDeletionDate=%s\n", absPath, now)
+	infoPath := filepath.Join(infoDir, destName+".trashinfo")
+	if err := os.WriteFile(infoPath, []byte(infoContent), 0o600); err != nil {
+		// Best-effort: if info file fails, try to move the file back
+		_ = os.Rename(destPath, path)
+		return fmt.Errorf("cannot write trash info: %w", err)
+	}
+
+	return nil
+}
+
 func MakeDir(parent string, name string) (string, error) {
 	target := filepath.Join(parent, name)
 	if err := os.MkdirAll(target, 0o755); err != nil {

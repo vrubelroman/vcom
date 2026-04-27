@@ -45,6 +45,7 @@ const (
 	opCopy fileOpKind = iota
 	opMove
 	opDelete
+	opPermanentDelete
 	opMkdir
 	opRename
 	opEdit
@@ -104,6 +105,7 @@ type copyProgressMsg struct {
 }
 
 type deletePlanMsg struct {
+	kind        fileOpKind
 	sourcePaths []string
 	stats       vfs.TransferStats
 	err         error
@@ -336,7 +338,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case opMove:
 			m.status = fmt.Sprintf("Moved to %s", msg.targetPath)
 		case opDelete:
-			m.status = "Deleted"
+			m.status = "Moved to trash"
+			m.activePane().ClearMarks()
+		case opPermanentDelete:
+			m.status = "Permanently deleted"
 			m.activePane().ClearMarks()
 		case opMkdir:
 			m.status = fmt.Sprintf("Created %s", msg.targetPath)
@@ -396,7 +401,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		title := "Delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + "?"
+		title := "Move selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + " to trash?"
+		if msg.kind == opPermanentDelete {
+			title = "Permanently delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + "?"
+		}
 		bodyLines := []string{
 			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
 			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
@@ -407,7 +415,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			strings.Join(bodyLines, "\n"),
 			"confirm-actions",
 			pendingOperation{
-				kind:        opDelete,
+				kind:        msg.kind,
 				sourcePaths: append([]string(nil), msg.sourcePaths...),
 				stats:       msg.stats,
 			},
@@ -893,6 +901,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Delete):
 			return m.handleDelete()
+		case key.Matches(msg, m.keys.PermanentDelete):
+			return m.handlePermanentDelete()
 		}
 
 	case tea.MouseMsg:
@@ -1376,19 +1386,10 @@ func (m *Model) enterSelected() error {
 		m.status = "File is shown in the middle pane. Use F3 for pager or F4 for editor."
 		return nil
 	}
-	// When inside an archive mount and selecting "..", use archive-aware
-	// navigation (goParent) instead of blindly setting pane.Path to the
-	// parent directory (which would be /tmp for a temp-mounted archive).
-	if selected.IsParent {
-		if _, archiveMounted := pane.CurrentArchive(); archiveMounted {
-			return m.goParent()
-		}
-	}
 	// Save current directory to history before navigating.
 	pane.PushHistory(pane.Path)
-	currentName := selected.Name
 	pane.Path = selected.Path
-	if err := m.reloadPane(pane.ID, currentName); err != nil {
+	if err := m.reloadPane(pane.ID, selected.Name); err != nil {
 		return err
 	}
 	m.status = fmt.Sprintf("Entered %s", pane.Path)
@@ -1407,6 +1408,19 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 	selected, ok := m.activePane().Selected()
 	if !ok {
 		return m, nil
+	}
+
+	// Navigating up via ".." — use goParent which preserves the cursor
+	// position on the directory/archive we came from (by finding its name
+	// in the parent listing via FindSelected). This applies both inside
+	// archive mounts (where pane.Path must stay within the temp mount)
+	// and regular directories (for consistent cursor placement).
+	if selected.IsParent {
+		if err := m.goParent(); err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		return m, m.loadPreviewCmd()
 	}
 
 	if selected.IsDir {
@@ -1647,13 +1661,35 @@ func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 	}
 	if !m.cfg.Behavior.ConfirmDelete {
 		m.busy = true
-		m.status = fmt.Sprintf("Deleting %d entr%s", len(sources), pluralSuffix(len(sources), "y", "ies"))
-		return m, deletePathsCmd(sources)
+		m.status = fmt.Sprintf("Moving %d entr%s to trash", len(sources), pluralSuffix(len(sources), "y", "ies"))
+		return m, trashPathsCmd(sources)
+	}
+
+	m.busy = true
+	m.status = "Calculating trash size"
+	return m, trashPlanCmd(sources)
+}
+
+func (m *Model) handlePermanentDelete() (tea.Model, tea.Cmd) {
+	if m.activePane().InArchive() {
+		m.status = "Archive mode is read-only; permanent delete is disabled"
+		return m, nil
+	}
+
+	sources := m.operationSources()
+	if len(sources) == 0 {
+		m.status = "Nothing to delete"
+		return m, nil
+	}
+	if !m.cfg.Behavior.ConfirmDelete {
+		m.busy = true
+		m.status = fmt.Sprintf("Permanently deleting %d entr%s", len(sources), pluralSuffix(len(sources), "y", "ies"))
+		return m, deletePathsPermanentCmd(sources)
 	}
 
 	m.busy = true
 	m.status = "Calculating delete size"
-	return m, deletePlanCmd(sources)
+	return m, deletePlanPermanentCmd(sources)
 }
 
 func (m *Model) handleView() (tea.Model, tea.Cmd) {
@@ -2181,6 +2217,8 @@ func (m *Model) openHelpModal() {
 		"  t              cycle theme",
 		"",
 		"Dialogs and Transfers",
+		"  F8 / x         move selected entry to trash",
+		"  F11 / d        permanently delete selected entry",
 		"  r              rename selected entry",
 		"  Enter / y      confirm action",
 		"  Esc / n        cancel action",
@@ -3526,7 +3564,9 @@ func (p pendingOperation) cmd() tea.Cmd {
 	case opMove:
 		return nil
 	case opDelete:
-		return deletePathsCmd(p.sourcePaths)
+		return trashPathsCmd(p.sourcePaths)
+	case opPermanentDelete:
+		return deletePathsPermanentCmd(p.sourcePaths)
 	default:
 		return nil
 	}
@@ -3603,27 +3643,6 @@ func (m *Model) cleanupArchiveMounts() {
 	for _, pane := range []*BrowserPane{&m.left, &m.right} {
 		for _, mount := range pane.ClearArchives() {
 			_ = os.RemoveAll(mount.TempDir)
-		}
-	}
-}
-
-func deletePlanCmd(sourcePaths []string) tea.Cmd {
-	return func() tea.Msg {
-		stats := vfs.TransferStats{}
-		var err error
-		for _, sourcePath := range sourcePaths {
-			part, statErr := vfs.CopyStats(sourcePath)
-			if statErr != nil {
-				err = statErr
-				break
-			}
-			stats.FilesTotal += part.FilesTotal
-			stats.BytesTotal += part.BytesTotal
-		}
-		return deletePlanMsg{
-			sourcePaths: append([]string(nil), sourcePaths...),
-			stats:       stats,
-			err:         err,
 		}
 	}
 }
@@ -3822,14 +3841,69 @@ func moveCmd(sourcePath, targetDir string, overwrite bool) tea.Cmd {
 	}
 }
 
-func deletePathsCmd(paths []string) tea.Cmd {
+func trashPathsCmd(paths []string) tea.Cmd {
 	return func() tea.Msg {
 		for _, path := range paths {
-			if err := vfs.DeletePath(path); err != nil {
+			if err := vfs.MoveToTrash(path); err != nil {
 				return opMsg{kind: opDelete, sourcePath: path, err: err}
 			}
 		}
 		return opMsg{kind: opDelete}
+	}
+}
+
+func deletePathsPermanentCmd(paths []string) tea.Cmd {
+	return func() tea.Msg {
+		for _, path := range paths {
+			if err := vfs.DeletePath(path); err != nil {
+				return opMsg{kind: opPermanentDelete, sourcePath: path, err: err}
+			}
+		}
+		return opMsg{kind: opPermanentDelete}
+	}
+}
+
+func trashPlanCmd(sourcePaths []string) tea.Cmd {
+	return func() tea.Msg {
+		stats := vfs.TransferStats{}
+		var err error
+		for _, sourcePath := range sourcePaths {
+			part, statErr := vfs.CopyStats(sourcePath)
+			if statErr != nil {
+				err = statErr
+				break
+			}
+			stats.FilesTotal += part.FilesTotal
+			stats.BytesTotal += part.BytesTotal
+		}
+		return deletePlanMsg{
+			kind:        opDelete,
+			sourcePaths: append([]string(nil), sourcePaths...),
+			stats:       stats,
+			err:         err,
+		}
+	}
+}
+
+func deletePlanPermanentCmd(sourcePaths []string) tea.Cmd {
+	return func() tea.Msg {
+		stats := vfs.TransferStats{}
+		var err error
+		for _, sourcePath := range sourcePaths {
+			part, statErr := vfs.CopyStats(sourcePath)
+			if statErr != nil {
+				err = statErr
+				break
+			}
+			stats.FilesTotal += part.FilesTotal
+			stats.BytesTotal += part.BytesTotal
+		}
+		return deletePlanMsg{
+			kind:        opPermanentDelete,
+			sourcePaths: append([]string(nil), sourcePaths...),
+			stats:       stats,
+			err:         err,
+		}
 	}
 }
 
@@ -3932,7 +4006,9 @@ func operationDoneLabel(kind fileOpKind) string {
 	case opCopy:
 		return "Copied"
 	case opDelete:
-		return "Deleted"
+		return "Moved to trash"
+	case opPermanentDelete:
+		return "Permanently deleted"
 	case opArchive:
 		return "Archived"
 	default:
@@ -3947,7 +4023,9 @@ func operationVerb(kind fileOpKind) string {
 	case opMove:
 		return "move"
 	case opDelete:
-		return "delete"
+		return "trash"
+	case opPermanentDelete:
+		return "permanent delete"
 	case opArchive:
 		return "archive"
 	default:
