@@ -4,7 +4,7 @@ right_path = ''
 
 [ui]
 app_title = 'vcom'
-theme = 'ayu-dark'
+theme = 'eldritch'
 icon_mode = 'auto'
 show_title_bar = true
 show_footer = true

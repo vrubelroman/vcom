@@ -162,12 +162,14 @@ icon_mode = "auto" # auto | nerd | ascii
 Built-in themes (use `T` to cycle or set `ui.theme` in config):
 
 - `catppuccin-mocha` (default)
+- `catppuccin-macchiato`
 - `catppuccin-lavender`
 - `tokyo-night`
 - `gruvbox-dark`
-- `gruvbox`
-- `nord-frost`
 - `nord`
+- `one-dark`
+- `everforest`
+- `github-dark`
 - `ayu-dark`
 - `breeze`
 - `cyberpunk`
