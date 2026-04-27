@@ -595,6 +595,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		msg = translateKeyMsg(msg)
 		if msg.String() != "y" {
 			m.pendingY = false
 		}
