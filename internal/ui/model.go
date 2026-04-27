@@ -2726,6 +2726,30 @@ func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int, useNerd
 	if meta.ImageFormat != "" {
 		rightRows = append(rightRows, fmt.Sprintf("image: %s %s", meta.ImageFormat, meta.ImageSize))
 	}
+	if meta.Duration != "" {
+		rightRows = append(rightRows, fmt.Sprintf("duration: %s", meta.Duration))
+	}
+	if meta.Bitrate != "" {
+		rightRows = append(rightRows, fmt.Sprintf("bitrate: %s", meta.Bitrate))
+	}
+	if meta.AudioCodec != "" {
+		rightRows = append(rightRows, fmt.Sprintf("audio: %s", meta.AudioCodec))
+	}
+	if meta.VideoCodec != "" {
+		rightRows = append(rightRows, fmt.Sprintf("video: %s", meta.VideoCodec))
+	}
+	if meta.Dimensions != "" {
+		rightRows = append(rightRows, fmt.Sprintf("resolution: %s", meta.Dimensions))
+	}
+	if meta.SampleRate != "" {
+		rightRows = append(rightRows, fmt.Sprintf("rate: %s", meta.SampleRate))
+	}
+	if meta.Channels != "" {
+		rightRows = append(rightRows, fmt.Sprintf("channels: %s", meta.Channels))
+	}
+	if meta.PageCount != "" {
+		rightRows = append(rightRows, fmt.Sprintf("pages: %s", meta.PageCount))
+	}
 
 	leftWidth := max(innerWidth/2, 18)
 	if leftWidth > innerWidth {
@@ -3550,6 +3574,12 @@ func previewIcon(preview vfs.Preview) string {
 		return "󰋩"
 	case vfs.PreviewKindText:
 		return "󰈙"
+	case vfs.PreviewKindPDF:
+		return "󰷉"
+	case vfs.PreviewKindAudio:
+		return "󰋋"
+	case vfs.PreviewKindVideo:
+		return "󰋲"
 	case vfs.PreviewKindBinary:
 		return "󰈔"
 	case vfs.PreviewKindError:

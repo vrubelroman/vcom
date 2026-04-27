@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -9,6 +10,7 @@ import (
 	_ "image/png"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -30,6 +32,9 @@ const (
 	PreviewKindDirectory PreviewKind = "directory"
 	PreviewKindText      PreviewKind = "text"
 	PreviewKindImage     PreviewKind = "image"
+	PreviewKindPDF       PreviewKind = "pdf"
+	PreviewKindAudio     PreviewKind = "audio"
+	PreviewKindVideo     PreviewKind = "video"
 	PreviewKindBinary    PreviewKind = "binary"
 	PreviewKindError     PreviewKind = "error"
 )
@@ -45,6 +50,16 @@ type Metadata struct {
 	ImageFormat string
 	ImageSize   string
 	Extension   string
+
+	// Extended preview metadata
+	Duration   string
+	Bitrate    string
+	AudioCodec string
+	VideoCodec string
+	SampleRate string
+	Channels   string
+	PageCount  string
+	Dimensions string
 }
 
 type Preview struct {
@@ -128,6 +143,17 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 		}
 		preview.PlainBody = preview.Body
 		return preview
+	}
+
+	// Extended preview for PDF, audio, video via external utilities
+	if hasExt(pdfExtensions, entry.Extension) {
+		return buildPDFPreview(entry, options, preview)
+	}
+	if hasExt(audioExtensions, entry.Extension) {
+		return buildAudioPreview(entry, options, preview)
+	}
+	if hasExt(videoExtensions, entry.Extension) {
+		return buildVideoPreview(entry, options, preview)
 	}
 
 	if IsBinarySample(data) {
@@ -389,6 +415,260 @@ func previewIcon(entry Entry, useNerdIcons bool) string {
 
 func renderImageInlinePreview(path string, width int, height int) string {
 	return ""
+}
+
+func findTool(name string) string {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+func buildPDFPreview(entry Entry, options PreviewOptions, base Preview) Preview {
+	pdftotext := findTool("pdftotext")
+	if pdftotext == "" {
+		base.Kind = PreviewKindBinary
+		base.Body = "PDF file detected.\nInstall poppler-utils (pdftotext) for text preview."
+		base.PlainBody = base.Body
+		return base
+	}
+
+	cmd := exec.Command(pdftotext, "-layout", "-nopgbrk", entry.Path, "-")
+	out, err := cmd.Output()
+	if err != nil {
+		base.Kind = PreviewKindError
+		base.Body = fmt.Sprintf("pdftotext error:\n\n%s", err)
+		base.PlainBody = base.Body
+		return base
+	}
+
+	text := string(out)
+	if int64(len(text)) > options.MaxPreviewBytes {
+		text = text[:options.MaxPreviewBytes]
+	}
+
+	// Get page count via pdfinfo if available
+	pdfinfo := findTool("pdfinfo")
+	if pdfinfo != "" {
+		infoCmd := exec.Command(pdfinfo, entry.Path)
+		if infoOut, err := infoCmd.Output(); err == nil {
+			for _, line := range strings.Split(string(infoOut), "\n") {
+				if strings.HasPrefix(strings.ToLower(line), "pages:") {
+					base.Metadata.PageCount = strings.TrimSpace(strings.TrimPrefix(line[5:], ":"))
+					break
+				}
+			}
+		}
+	}
+
+	base.Kind = PreviewKindPDF
+	base.PlainBody = text
+	base.Body = highlightText(entry.Path, text, options.ThemeName)
+	return base
+}
+
+func buildAudioPreview(entry Entry, options PreviewOptions, base Preview) Preview {
+	ffprobe := findTool("ffprobe")
+	if ffprobe == "" {
+		base.Kind = PreviewKindBinary
+		base.Body = "Audio file detected.\nInstall ffmpeg (ffprobe) for metadata preview."
+		base.PlainBody = base.Body
+		return base
+	}
+
+	cmd := exec.Command(ffprobe,
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_format",
+		"-show_streams",
+		entry.Path,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		base.Kind = PreviewKindError
+		base.Body = fmt.Sprintf("ffprobe error:\n\n%s", err)
+		base.PlainBody = base.Body
+		return base
+	}
+
+	var info struct {
+		Format struct {
+			Duration string `json:"duration"`
+			Bitrate  string `json:"bit_rate"`
+		} `json:"format"`
+		Streams []struct {
+			CodecType  string `json:"codec_type"`
+			CodecName  string `json:"codec_name"`
+			SampleRate string `json:"sample_rate"`
+			Channels   int    `json:"channels"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		base.Kind = PreviewKindError
+		base.Body = fmt.Sprintf("Could not parse ffprobe output:\n\n%s", err)
+		base.PlainBody = base.Body
+		return base
+	}
+
+	// Format duration
+	if info.Format.Duration != "" {
+		if secs, err := strconv.ParseFloat(info.Format.Duration, 64); err == nil {
+			mins := int(secs) / 60
+			secsRem := int(secs) % 60
+			base.Metadata.Duration = fmt.Sprintf("%d:%02d", mins, secsRem)
+		}
+	}
+
+	if info.Format.Bitrate != "" {
+		if bps, err := strconv.ParseInt(info.Format.Bitrate, 10, 64); err == nil {
+			base.Metadata.Bitrate = fmt.Sprintf("%d kbps", bps/1000)
+		}
+	}
+
+	for _, stream := range info.Streams {
+		if stream.CodecType == "audio" {
+			base.Metadata.AudioCodec = stream.CodecName
+			if stream.SampleRate != "" {
+				base.Metadata.SampleRate = stream.SampleRate + " Hz"
+			}
+			switch stream.Channels {
+			case 1:
+				base.Metadata.Channels = "mono"
+			case 2:
+				base.Metadata.Channels = "stereo"
+			case 6:
+				base.Metadata.Channels = "5.1"
+			case 8:
+				base.Metadata.Channels = "7.1"
+			default:
+				base.Metadata.Channels = fmt.Sprintf("%d ch", stream.Channels)
+			}
+			break
+		}
+	}
+
+	var lines []string
+	lines = append(lines, fmt.Sprintf("  Duration: %s", base.Metadata.Duration))
+	if base.Metadata.Bitrate != "" {
+		lines = append(lines, fmt.Sprintf("  Bitrate:  %s", base.Metadata.Bitrate))
+	}
+	if base.Metadata.AudioCodec != "" {
+		lines = append(lines, fmt.Sprintf("  Codec:    %s", base.Metadata.AudioCodec))
+	}
+	if base.Metadata.SampleRate != "" {
+		lines = append(lines, fmt.Sprintf("  Rate:     %s", base.Metadata.SampleRate))
+	}
+	if base.Metadata.Channels != "" {
+		lines = append(lines, fmt.Sprintf("  Channels: %s", base.Metadata.Channels))
+	}
+
+	base.Kind = PreviewKindAudio
+	base.Body = fmt.Sprintf("🎵 Audio File\n\n%s", strings.Join(lines, "\n"))
+	base.PlainBody = fmt.Sprintf("Audio File\n\nDuration: %s\nBitrate: %s\nCodec: %s\nRate: %s\nChannels: %s",
+		base.Metadata.Duration, base.Metadata.Bitrate, base.Metadata.AudioCodec,
+		base.Metadata.SampleRate, base.Metadata.Channels)
+	return base
+}
+
+func buildVideoPreview(entry Entry, options PreviewOptions, base Preview) Preview {
+	ffprobe := findTool("ffprobe")
+	if ffprobe == "" {
+		base.Kind = PreviewKindBinary
+		base.Body = "Video file detected.\nInstall ffmpeg (ffprobe) for metadata preview."
+		base.PlainBody = base.Body
+		return base
+	}
+
+	cmd := exec.Command(ffprobe,
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_format",
+		"-show_streams",
+		entry.Path,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		base.Kind = PreviewKindError
+		base.Body = fmt.Sprintf("ffprobe error:\n\n%s", err)
+		base.PlainBody = base.Body
+		return base
+	}
+
+	var info struct {
+		Format struct {
+			Duration string `json:"duration"`
+			Bitrate  string `json:"bit_rate"`
+		} `json:"format"`
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			CodecName string `json:"codec_name"`
+			Width     int    `json:"width"`
+			Height    int    `json:"height"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		base.Kind = PreviewKindError
+		base.Body = fmt.Sprintf("Could not parse ffprobe output:\n\n%s", err)
+		base.PlainBody = base.Body
+		return base
+	}
+
+	// Format duration
+	if info.Format.Duration != "" {
+		if secs, err := strconv.ParseFloat(info.Format.Duration, 64); err == nil {
+			hrs := int(secs) / 3600
+			mins := (int(secs) % 3600) / 60
+			secsRem := int(secs) % 60
+			if hrs > 0 {
+				base.Metadata.Duration = fmt.Sprintf("%d:%02d:%02d", hrs, mins, secsRem)
+			} else {
+				base.Metadata.Duration = fmt.Sprintf("%d:%02d", mins, secsRem)
+			}
+		}
+	}
+
+	if info.Format.Bitrate != "" {
+		if bps, err := strconv.ParseInt(info.Format.Bitrate, 10, 64); err == nil {
+			base.Metadata.Bitrate = fmt.Sprintf("%d kbps", bps/1000)
+		}
+	}
+
+	for _, stream := range info.Streams {
+		switch stream.CodecType {
+		case "video":
+			base.Metadata.VideoCodec = stream.CodecName
+			if stream.Width > 0 && stream.Height > 0 {
+				base.Metadata.Dimensions = fmt.Sprintf("%dx%d", stream.Width, stream.Height)
+			}
+		case "audio":
+			if base.Metadata.AudioCodec == "" {
+				base.Metadata.AudioCodec = stream.CodecName
+			}
+		}
+	}
+
+	var lines []string
+	lines = append(lines, fmt.Sprintf("  Duration:   %s", base.Metadata.Duration))
+	if base.Metadata.Bitrate != "" {
+		lines = append(lines, fmt.Sprintf("  Bitrate:    %s", base.Metadata.Bitrate))
+	}
+	if base.Metadata.VideoCodec != "" {
+		lines = append(lines, fmt.Sprintf("  Video:      %s", base.Metadata.VideoCodec))
+	}
+	if base.Metadata.Dimensions != "" {
+		lines = append(lines, fmt.Sprintf("  Resolution: %s", base.Metadata.Dimensions))
+	}
+	if base.Metadata.AudioCodec != "" {
+		lines = append(lines, fmt.Sprintf("  Audio:      %s", base.Metadata.AudioCodec))
+	}
+
+	base.Kind = PreviewKindVideo
+	base.Body = fmt.Sprintf("🎬 Video File\n\n%s", strings.Join(lines, "\n"))
+	base.PlainBody = fmt.Sprintf("Video File\n\nDuration: %s\nBitrate: %s\nVideo: %s\nResolution: %s\nAudio: %s",
+		base.Metadata.Duration, base.Metadata.Bitrate, base.Metadata.VideoCodec,
+		base.Metadata.Dimensions, base.Metadata.AudioCodec)
+	return base
 }
 
 func detectImage(data []byte) (string, string, bool) {

@@ -56,6 +56,17 @@ var (
 		"png": {}, "jpg": {}, "jpeg": {}, "gif": {}, "webp": {}, "bmp": {}, "svg": {}, "ico": {},
 		"avif": {}, "heic": {}, "heif": {}, "tiff": {}, "tif": {},
 	}
+	pdfExtensions = map[string]struct{}{
+		"pdf": {},
+	}
+	audioExtensions = map[string]struct{}{
+		"mp3": {}, "flac": {}, "ogg": {}, "opus": {}, "wav": {},
+		"aac": {}, "m4a": {}, "wma": {}, "dsf": {}, "ape": {},
+	}
+	videoExtensions = map[string]struct{}{
+		"mp4": {}, "mkv": {}, "mov": {}, "avi": {}, "webm": {},
+		"m4v": {}, "wmv": {}, "flv": {}, "ts": {}, "mts": {},
+	}
 	archiveExtensions = map[string]struct{}{
 		"zip": {}, "tar": {}, "gz": {}, "tgz": {}, "xz": {}, "bz2": {}, "7z": {}, "rar": {},
 		"zst": {}, "lz": {}, "lz4": {}, "lzma": {},
@@ -113,6 +124,12 @@ func (e Entry) Category() string {
 		return "image"
 	case hasExt(textExtensions, e.Extension):
 		return "text"
+	case hasExt(pdfExtensions, e.Extension):
+		return "pdf"
+	case hasExt(audioExtensions, e.Extension):
+		return "audio"
+	case hasExt(videoExtensions, e.Extension):
+		return "video"
 	case hasExt(archiveExtensions, e.Extension):
 		return "archive"
 	case hasExt(textFilenames, strings.ToLower(e.Name)):
