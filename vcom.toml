@@ -1,15 +1,15 @@
 [startup]
-# left_path = "~/Downloads"
-# right_path = "~/Projects"
+left_path = ''
+right_path = ''
 
 [ui]
-app_title = "vcom"
-theme = "catppuccin-mocha"
-icon_mode = "auto" # auto | nerd | ascii
+app_title = 'vcom'
+theme = 'catppuccin-mocha'
+icon_mode = 'auto'
 show_title_bar = true
 show_footer = true
-border = "rounded"
-path_display = "smart"
+border = 'rounded'
+path_display = 'smart'
 pane_gap = 1
 center_width_percent = 30
 
@@ -19,30 +19,22 @@ dirs_first = true
 human_readable_size = true
 
 [browser.sort]
-by = "name"
+by = 'name'
 reverse = false
-
-# by = "modified"
-# by = "size"
-# reverse = true
 
 [browser.columns]
 name = true
 size = true
 modified = true
-
-# created = true
-# permissions = true
-# extension = true
+created = false
+permissions = false
+extension = false
 
 [preview]
 show_metadata = true
 wrap_text = false
 max_preview_bytes = 65536
 directory_preview_limit = 80
-
-# wrap_text = true
-# max_preview_bytes = 131072
 
 [behavior]
 confirm_delete = true

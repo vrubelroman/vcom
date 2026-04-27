@@ -183,6 +183,7 @@ type Model struct {
 	copyJob      *copyJobState
 	nextCopyJob  int
 	copyProgress chan tea.Msg
+	copyPath     string
 }
 
 func NewModel(cfg config.Config, configPath string) (Model, error) {
@@ -585,6 +586,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Copy file path when info mode is open
+		if m.infoMode && m.copyPath != "" {
+			switch msg.String() {
+			case "y", "Y", "ctrl+c":
+				if err := clipboard.WriteAll(m.copyPath); err != nil {
+					m.status = fmt.Sprintf("Copy path error: %v", err)
+				} else {
+					m.status = fmt.Sprintf("Path copied: %s", m.copyPath)
+				}
+				return m, nil
+			}
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			m.cleanupArchiveMounts()
@@ -602,6 +616,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectMode = false
 				m.cursorMode = false
 				m.visualMode = false
+				m.copyPath = ""
 				m.status = "Info pane closed"
 				return m, nil
 			}
@@ -715,7 +730,7 @@ func (m Model) View() string {
 	} else if m.viewMode && m.previewData.Kind == vfs.PreviewKindText {
 		panels = renderSelectionPane(m.previewData, &m.previewModel, m.palette, m.width, bodyHeight)
 	} else if m.viewMode {
-		panels = renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, m.width, bodyHeight)
+		panels = renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, m.width, bodyHeight, m.nerdIcons)
 	} else if m.selectMode && m.infoMode {
 		panels = renderSelectionPane(m.previewData, &m.previewModel, m.palette, m.width, bodyHeight)
 	} else if m.infoMode {
@@ -724,12 +739,12 @@ func (m Model) View() string {
 				lipgloss.Top,
 				renderPane(m.left, m.cfg, m.palette, leftWidth, bodyHeight, true, m.hoverIndexFor(PaneLeft), m.nerdIcons),
 				gap,
-				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight),
+				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight, m.nerdIcons),
 			)
 		} else {
 			panels = lipgloss.JoinHorizontal(
 				lipgloss.Top,
-				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight),
+				renderPreviewPane(m.previewData, &m.previewModel, m.cfg, m.palette, previewWidth, bodyHeight, m.nerdIcons),
 				gap,
 				renderPane(m.right, m.cfg, m.palette, rightWidth, bodyHeight, true, m.hoverIndexFor(PaneRight), m.nerdIcons),
 			)
@@ -1253,6 +1268,15 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(1)
 		return m, m.loadPreviewCmd()
 	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		if m.copyPath != "" && m.mouseOverPathLine(msg.X, msg.Y) {
+			if err := clipboard.WriteAll(m.copyPath); err != nil {
+				m.status = fmt.Sprintf("Copy path error: %v", err)
+			} else {
+				m.status = fmt.Sprintf("Path copied: %s", m.copyPath)
+			}
+			return m, nil
+		}
+
 		paneID, index, ok := m.mouseTarget(msg.X, msg.Y)
 		if !ok {
 			return m, nil
@@ -1284,6 +1308,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.visualMode = false
 			m.resizePreview()
 			m.syncPreviewContent()
+			m.copyPath = ""
 			m.status = "Info mode: off"
 			return m, nil
 		}
@@ -1298,6 +1323,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.cursorMode = false
 			m.visualMode = false
 			m.hover = hoverState{pane: paneID, index: index, ok: true}
+			m.copyPath = ""
 			m.status = "Info mode: off"
 			return m, nil
 		}
@@ -1691,6 +1717,9 @@ func (m *Model) applyDirSize(path string, size int64) {
 func (m *Model) applyPreview(preview vfs.Preview) {
 	m.previewData = preview
 	m.syncPreviewContent()
+	if m.infoMode {
+		m.copyPath = preview.Metadata.Path
+	}
 }
 
 func (m *Model) syncPreviewContent() {
@@ -2059,7 +2088,7 @@ func (m *Model) ensureTextCursorVisible() {
 	}
 }
 
-func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg config.Config, palette theme.Palette, width int, height int) string {
+func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg config.Config, palette theme.Palette, width int, height int, useNerdfont bool) string {
 	innerWidth := max(width-2, 1)
 	innerHeight := max(height-2, 1)
 	contentWidth := max(innerWidth-2, 1)
@@ -2084,7 +2113,7 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 	parts := []string{title}
 	usedHeight := lipgloss.Height(title)
 	if cfg.Preview.ShowMetadata {
-		metaView := renderMetadata(preview.Metadata, palette, innerWidth)
+		metaView := renderMetadata(preview.Metadata, palette, innerWidth, useNerdfont)
 		parts = append(parts, metaView)
 		usedHeight += lipgloss.Height(metaView)
 	}
@@ -2118,7 +2147,7 @@ func renderSelectionPane(preview vfs.Preview, viewportModel *viewport.Model, pal
 		Render(viewportModel.View())
 }
 
-func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int) string {
+func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int, useNerdfont bool) string {
 	outerWidth := max(width-2, 1)
 	innerWidth := max(outerWidth-2, 1)
 	leftRows := []string{
@@ -2153,11 +2182,17 @@ func renderMetadata(meta vfs.Metadata, palette theme.Palette, width int) string 
 		Foreground(palette.Text).
 		Render(strings.Join(rightRows, "\n"))
 
+	copyIcon := "📋"
+	if useNerdfont {
+		copyIcon = "󰆏"
+	}
+	iconWidth := lipgloss.Width(copyIcon)
+	pathAvailable := max(innerWidth-6-iconWidth-3, 10) // "path: "=6, icon, spacing
 	pathLine := lipgloss.NewStyle().
 		Width(innerWidth).
 		Background(palette.PanelElevated).
 		Foreground(palette.Text).
-		Render(fmt.Sprintf("path: %s", truncateMiddle(meta.Path, max(innerWidth-8, 16))))
+		Render(fmt.Sprintf("path: %s %s", truncateMiddle(meta.Path, pathAvailable), copyIcon))
 
 	return lipgloss.NewStyle().
 		Width(outerWidth).
@@ -3434,7 +3469,7 @@ func (m Model) syncImageOverlay(leftWidth int, previewWidth int, bodyHeight int)
 		innerWidth := max(previewWidth-2, 1)
 		metaHeight := 0
 		if m.cfg.Preview.ShowMetadata {
-			metaHeight = lipgloss.Height(renderMetadata(m.previewData.Metadata, m.palette, innerWidth))
+			metaHeight = lipgloss.Height(renderMetadata(m.previewData.Metadata, m.palette, innerWidth, m.nerdIcons))
 		}
 		titleHeight := 1
 		topInset := 1
@@ -3490,4 +3525,36 @@ func (m *Model) mouseOverPreview(x, y int) bool {
 	}
 
 	return x >= 0 && x < previewWidth
+}
+
+func (m *Model) mouseOverPathLine(x, y int) bool {
+	if !m.infoMode || !m.cfg.Preview.ShowMetadata || m.width <= 0 || m.height <= 0 {
+		return false
+	}
+
+	leftWidth, previewWidth, _ := m.layoutWidths()
+	bodyHeight := m.bodyHeight()
+	if y < 0 || y >= bodyHeight {
+		return false
+	}
+
+	// Preview pane x-range
+	var startX int
+	if m.active == PaneLeft {
+		startX = leftWidth + m.cfg.UI.PaneGap
+	} else {
+		startX = 0
+	}
+	if x < startX || x >= startX+previewWidth {
+		return false
+	}
+
+	// The path line is within the metadata section (approximate Y range 1-7).
+	// Check that Y is in the metadata area and X is in the right half where the icon is.
+	if y < 1 || y > 7 {
+		return false
+	}
+	// The icon is at the far-right end of the preview pane content area
+	iconStartX := startX + previewWidth/2
+	return x >= iconStartX
 }
