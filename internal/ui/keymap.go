@@ -41,7 +41,7 @@ func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Help:           key.NewBinding(key.WithKeys("f1", "?"), key.WithHelp("F1/?", "help")),
 		Rename:         key.NewBinding(key.WithKeys("f2", "r"), key.WithHelp("F2/r", "rename")),
-		View:           key.NewBinding(key.WithKeys("f3"), key.WithHelp("F3", "view")),
+		View:           key.NewBinding(key.WithKeys("f3", "v"), key.WithHelp("F3/v", "view")),
 		Visual:         key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "visual")),
 		Caret:          key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "caret")),
 		Edit:           key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
@@ -69,19 +69,19 @@ func DefaultKeyMap() KeyMap {
 		Confirm:        key.NewBinding(key.WithKeys("enter", "y"), key.WithHelp("Enter/y", "confirm")),
 		Background:     key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "background")),
 		ProgressCancel: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "cancel transfer")),
-		Cancel:         key.NewBinding(key.WithKeys("esc", "n"), key.WithHelp("Esc/n", "cancel")),
+		Cancel:         key.NewBinding(key.WithKeys("esc"), key.WithHelp("Esc", "cancel")),
 		Quit:           key.NewBinding(key.WithKeys("f10", "q", "ctrl+c"), key.WithHelp("F10/q", "quit")),
 	}
 }
 
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Help, k.Rename, k.View, k.Archive, k.Copy, k.Delete, k.Info, k.Quit}
+	return []key.Binding{k.Help, k.Rename, k.View, k.Archive, k.Copy, k.Move, k.Mkdir, k.Delete, k.Info, k.Quit}
 }
 
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Help, k.Up, k.Down, k.SelectUp, k.SelectDown, k.Open, k.Back},
-		{k.Rename, k.View, k.Caret, k.Visual, k.Edit, k.Archive, k.Copy, k.Move, k.Delete},
+		{k.Rename, k.View, k.Caret, k.Edit, k.Archive, k.Copy, k.Move, k.Delete},
 		{k.SelectText, k.DirSize, k.Refresh, k.ToggleHidden, k.CycleSort, k.CycleTheme, k.Quit},
 	}
 }
