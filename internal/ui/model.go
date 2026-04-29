@@ -3089,10 +3089,9 @@ func (m *Model) openHelpModal() {
 		"  Ctrl+r         refresh both panes",
 		"",
 		"View and Panels",
-		"  o              toggle preview/info pane",
 		"  i              show text caret in preview pane",
 		"  v              start visual selection from caret",
-		"  Esc / q        close view/info/caret mode",
+		"  Esc            close view/info/caret mode",
 		"  yy             copy current line in caret mode",
 		"  y              copy visual selection to clipboard",
 		"  h / l          move caret left/right",
@@ -3100,23 +3099,14 @@ func (m *Model) openHelpModal() {
 		"  Ctrl+t         mouse selection mode in text preview pane",
 		"  Space          calculate selected directory size",
 		"  p              mirror current path to opposite pane",
-		"  s              toggle SSH host list",
 		"  g              cycle sort mode",
 		"  .              toggle hidden files",
-		"  t              cycle theme",
-		"",
-		"Dialogs and Transfers",
-		"  x              delete selected entry",
-		"  a              archive selected entry",
-		"  r              rename selected entry",
-		"  n              create new directory",
-		"  Enter / y      confirm action",
-		"  Esc / n        cancel action",
+		"  t              select theme",
 	}
 
 	m.modal = modalState{
 		kind:  modalHelp,
-		title: "Keyboard and Mouse Help",
+		title: "Keyboard Help",
 		body:  strings.Join(sections, "\n"),
 		note:  version + "  —  F1/? or Esc to close",
 	}
@@ -3906,12 +3896,6 @@ func renderThemeSelectModal(m Model, palette theme.Palette, width int) string {
 		Background(palette.Selection).
 		Foreground(palette.Accent)
 
-	instructions := lipgloss.NewStyle().
-		Width(contentWidth).
-		Background(palette.Panel).
-		Foreground(palette.Muted).
-		Render("↑/↓ navigate · Enter apply · Esc cancel")
-
 	box := lipgloss.NewStyle().
 		Width(contentWidth).
 		Padding(1, 2).
@@ -3925,8 +3909,6 @@ func renderThemeSelectModal(m Model, palette theme.Palette, width int) string {
 
 	lines := []string{
 		titleStyle.Render("Select Theme"),
-		spacer,
-		instructions,
 		spacer,
 	}
 
@@ -3979,6 +3961,19 @@ func renderThemeSelectModal(m Model, palette theme.Palette, width int) string {
 		// Build the row
 		row := cursorPart + namePart + gap + swatch
 		lines = append(lines, row)
+	}
+
+	// Instruction line at the bottom with colored Enter/Esc tokens
+	lines = append(lines, spacer)
+	hintRaw := "↑/↓ navigate · Enter apply · Esc cancel"
+	if highlighted, ok := renderModalHintTokens(hintRaw, contentWidth, palette, palette.Muted); ok {
+		lines = append(lines, highlighted)
+	} else {
+		noteStyle := lipgloss.NewStyle().
+			Width(contentWidth).
+			Background(palette.Panel).
+			Foreground(palette.Muted)
+		lines = append(lines, noteStyle.Render(hintRaw))
 	}
 
 	return box.Render(strings.Join(lines, "\n"))
