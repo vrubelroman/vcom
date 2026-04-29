@@ -74,18 +74,21 @@ var (
 )
 
 type Entry struct {
-	Name         string
-	Path         string
-	Extension    string
-	Mode         fs.FileMode
-	Size         int64
-	ModifiedAt   time.Time
-	CreatedAt    time.Time
-	CreatedKnown bool
-	IsDir        bool
-	IsParent     bool
-	IsHidden     bool
-	DirSizeKnown bool
+	Name           string
+	Path           string
+	Extension      string
+	Mode           fs.FileMode
+	Size           int64
+	ModifiedAt     time.Time
+	CreatedAt      time.Time
+	CreatedKnown   bool
+	IsDir          bool
+	IsParent       bool
+	IsHidden       bool
+	IsRemote       bool
+	Connected      bool
+	DirSizeKnown   bool
+	RemoteHostName string
 }
 
 func (e Entry) DisplayName() string {
@@ -114,6 +117,8 @@ func (e Entry) Category() string {
 	switch {
 	case e.IsParent:
 		return "parent"
+	case e.IsRemote:
+		return "remote"
 	case e.IsDir:
 		return "directory"
 	case hasExt(configExtensions, e.Extension):

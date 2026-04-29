@@ -9,6 +9,7 @@ import (
 
 	"vcom/internal/config"
 	vfs "vcom/internal/fs"
+	"vcom/internal/fs/remote"
 	"vcom/internal/theme"
 )
 
@@ -27,6 +28,7 @@ type BrowserPane struct {
 	Offset  int
 	Marked  map[string]struct{}
 	Archive []ArchiveMount
+	Remote  []RemoteMount
 
 	dirHistory []string
 	dirFuture  []string
@@ -37,6 +39,14 @@ type ArchiveMount struct {
 	ParentPath string
 	RootPath   string
 	TempDir    string
+}
+
+// RemoteMount represents an active SSH/SFTP remote filesystem connection.
+type RemoteMount struct {
+	Host       remote.SSHHost
+	RemotePath string
+	Client     *remote.SSHClient
+	Connected  bool
 }
 
 func (p *BrowserPane) Selected() (vfs.Entry, bool) {
@@ -268,7 +278,52 @@ func (p *BrowserPane) ClearArchives() []ArchiveMount {
 	return out
 }
 
+func (p *BrowserPane) PushRemote(mount RemoteMount) {
+	p.Remote = append(p.Remote, mount)
+}
+
+func (p *BrowserPane) PopRemote() (RemoteMount, bool) {
+	if len(p.Remote) == 0 {
+		return RemoteMount{}, false
+	}
+	last := p.Remote[len(p.Remote)-1]
+	p.Remote = p.Remote[:len(p.Remote)-1]
+	return last, true
+}
+
+func (p *BrowserPane) CurrentRemote() (RemoteMount, bool) {
+	if len(p.Remote) == 0 {
+		return RemoteMount{}, false
+	}
+	return p.Remote[len(p.Remote)-1], true
+}
+
+func (p *BrowserPane) InRemote() bool {
+	return len(p.Remote) > 0
+}
+
+func (p *BrowserPane) ClearRemotes() []RemoteMount {
+	if len(p.Remote) == 0 {
+		return nil
+	}
+	out := make([]RemoteMount, len(p.Remote))
+	copy(out, p.Remote)
+	p.Remote = nil
+	return out
+}
+
 func (p *BrowserPane) DisplayPath() string {
+	if len(p.Remote) > 0 {
+		top := p.Remote[len(p.Remote)-1]
+		statusIcon := "󰖩"
+		if !top.Connected {
+			statusIcon = "󰤭"
+		}
+		if top.RemotePath == "/" || top.RemotePath == "" {
+			return fmt.Sprintf("%s %s:", statusIcon, top.Host.Name)
+		}
+		return fmt.Sprintf("%s %s:%s", statusIcon, top.Host.Name, top.RemotePath)
+	}
 	if len(p.Archive) == 0 {
 		return p.Path
 	}
@@ -705,6 +760,8 @@ func entryIcon(entry vfs.Entry, useNerdIcons bool) string {
 		switch entry.Category() {
 		case "parent":
 			return "<-"
+		case "remote":
+			return "[SV]"
 		case "directory":
 			return "[D]"
 		case "config":
@@ -724,6 +781,8 @@ func entryIcon(entry vfs.Entry, useNerdIcons bool) string {
 	switch entry.Category() {
 	case "parent":
 		return "↩"
+	case "remote":
+		return "󰒋"
 	case "directory":
 		return ""
 	case "config":
@@ -743,6 +802,8 @@ func entryIcon(entry vfs.Entry, useNerdIcons bool) string {
 
 func entryColor(entry vfs.Entry, palette theme.Palette) lipgloss.Color {
 	switch entry.Category() {
+	case "remote":
+		return palette.ExecFile
 	case "directory", "parent":
 		return palette.Folder
 	case "config":

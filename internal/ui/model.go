@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,6 +22,7 @@ import (
 
 	"vcom/internal/config"
 	vfs "vcom/internal/fs"
+	"vcom/internal/fs/remote"
 	"vcom/internal/theme"
 )
 
@@ -37,6 +40,7 @@ const (
 	modalHelp
 	modalArchiveType
 	modalArchiveProgress
+	modalSSHConnect
 )
 
 type fileOpKind int
@@ -52,6 +56,7 @@ const (
 	opView
 	opArchive
 	opExecute
+	opDeleteHost
 )
 
 type pendingOperation struct {
@@ -61,6 +66,10 @@ type pendingOperation struct {
 	overwrite       bool
 	existingTargets int
 	stats           vfs.TransferStats
+
+	// Remote operation fields — non-nil when source/target is remote
+	srcClient *remote.SSHClient
+	dstClient *remote.SSHClient
 }
 
 type modalState struct {
@@ -98,6 +107,10 @@ type copyPlanMsg struct {
 	existingTargets int
 	stats           vfs.TransferStats
 	err             error
+
+	// Remote operation fields
+	srcClient *remote.SSHClient
+	dstClient *remote.SSHClient
 }
 
 type copyProgressMsg struct {
@@ -110,6 +123,9 @@ type deletePlanMsg struct {
 	sourcePaths []string
 	stats       vfs.TransferStats
 	err         error
+
+	// Remote operation — non-nil when source is remote
+	srcClient *remote.SSHClient
 }
 
 type archivePlanMsg struct {
@@ -136,6 +152,7 @@ type copyDoneMsg struct {
 	kind        fileOpKind
 	sourcePaths []string
 	targetDir   string
+	targetPath  string
 	err         error
 }
 
@@ -231,6 +248,8 @@ type Model struct {
 	nextArchiveJob  int
 	archiveProgress chan tea.Msg
 	archiveFormat   string
+	ssh             *sshState
+	preSSHPath      string // original path before entering SSH mode
 }
 
 func NewModel(cfg config.Config, configPath string) (Model, error) {
@@ -278,6 +297,15 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 	model.filterInput = filterInput
 
 	model.previewModel = viewport.New(0, 0)
+
+	sshSt, err := newSSHState()
+	if err != nil {
+		// Non-fatal: SSH support will be unavailable
+		model.status = fmt.Sprintf("SSH init: %v", err)
+	} else {
+		model.ssh = sshSt
+	}
+
 	if err := model.reloadPane(PaneLeft, ""); err != nil {
 		return Model{}, err
 	}
@@ -294,6 +322,7 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		log.Printf("[EVENT] WindowSizeMsg: %dx%d", msg.Width, msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resizePreview()
@@ -301,6 +330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case previewMsg:
+		log.Printf("[EVENT] previewMsg: path=%s kind=%d", msg.entryPath, msg.preview.Kind)
 		if selected, ok := m.activePane().Selected(); ok && selected.Path == msg.entryPath {
 			m.applyPreview(msg.preview)
 		}
@@ -318,36 +348,136 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dirSizeMsg:
 		m.busy = false
 		if msg.err != nil {
+			log.Printf("[ERROR] dirSizeMsg failed: path=%s err=%v", msg.path, msg.err)
 			m.status = fmt.Sprintf("Dir size failed: %v", msg.err)
 			return m, nil
 		}
+		log.Printf("[EVENT] dirSizeMsg: path=%s size=%d", msg.path, msg.size)
 		m.applyDirSize(msg.path, msg.size)
 		m.status = fmt.Sprintf("Directory size calculated: %s", vfs.HumanSize(msg.size))
 		return m, m.loadPreviewCmd()
 
+	case sshConnectMsg:
+		m.busy = false
+		if msg.err != nil {
+			log.Printf("[ERROR] sshConnectMsg failed: host=%s err=%v", msg.hostName, msg.err)
+			m.status = fmt.Sprintf("SSH connection failed: %v", msg.err)
+			return m, nil
+		}
+		if msg.client == nil {
+			log.Printf("[ERROR] sshConnectMsg: no client returned for host=%s", msg.hostName)
+			m.status = "SSH connection failed: no client returned"
+			return m, nil
+		}
+		pane := m.activePane()
+		host := m.ssh.store.FindByName(msg.hostName)
+		if host == nil {
+			msg.client.Close()
+			log.Printf("[ERROR] sshConnectMsg: host %q not found after connection", msg.hostName)
+			m.status = fmt.Sprintf("Host %q not found after connection", msg.hostName)
+			return m, nil
+		}
+		pane.PushRemote(RemoteMount{
+			Host:       *host,
+			RemotePath: "/",
+			Client:     msg.client,
+			Connected:  true,
+		})
+		pane.Path = "/"
+		log.Printf("[ACTION] SSH connected: host=%s pane=%s remotePath=/", host.DisplayName(), pane.ID)
+		if err := m.reloadRemotePane(pane.ID, ""); err != nil {
+			log.Printf("[ERROR] reloadRemotePane after SSH: %v", err)
+			m.status = fmt.Sprintf("Remote dir: %v", err)
+			return m, nil
+		}
+		if m.ssh != nil {
+			m.ssh.connectedHosts[msg.hostName] = true
+		}
+		m.status = fmt.Sprintf("Connected to %s", host.DisplayName())
+		return m, m.loadPreviewCmd()
+
+	case sshAddHostResultMsg:
+		m.busy = false
+		if m.ssh != nil {
+			m.ssh.testingConn = false
+		}
+		if msg.err != nil {
+			log.Printf("[ERROR] sshAddHostResultMsg: connection test failed: %v", msg.err)
+			m.status = fmt.Sprintf("Connection failed: %v", msg.err)
+			return m, nil
+		}
+
+		log.Printf("[ACTION] sshAddHostResultMsg: connection OK, saving host %q", msg.host.Name)
+		if m.ssh == nil {
+			m.status = "SSH not available"
+			return m, nil
+		}
+		if err := m.ssh.store.AddHost(msg.host); err != nil {
+			m.status = fmt.Sprintf("Failed to save host: %v", err)
+			return m, nil
+		}
+
+		m.status = fmt.Sprintf("Host %q added and verified", msg.host.Name)
+
+		// Refresh the SSH host list if currently on it
+		pane := m.activePane()
+		if pane.Path == "ssh://" {
+			entries := buildSSHHostEntries(m.ssh.store, m.ssh.connectedHosts)
+			pane.SetEntries(entries, "")
+		}
+		return m, nil
+
 	case opMsg:
 		m.busy = false
 		if msg.err != nil {
+			log.Printf("[ERROR] opMsg failed: kind=%d sourcePath=%s err=%v", msg.kind, msg.sourcePath, msg.err)
 			m.status = msg.err.Error()
 			return m, nil
 		}
 
 		m.modal = modalState{}
+
+		// Capture current selections BEFORE switch, so mkdir/rename can override
+		leftSelection := selectedName(&m.left)
+		rightSelection := selectedName(&m.right)
+
 		switch msg.kind {
 		case opCopy:
+			log.Printf("[ACTION] opMsg: Copy done — targetPath=%s", msg.targetPath)
 			m.status = fmt.Sprintf("Copied to %s", msg.targetPath)
+			m.activePane().ClearMarks()
 		case opMove:
+			log.Printf("[ACTION] opMsg: Move done — targetPath=%s", msg.targetPath)
 			m.status = fmt.Sprintf("Moved to %s", msg.targetPath)
+			m.activePane().ClearMarks()
 		case opDelete:
+			log.Printf("[ACTION] opMsg: Delete done — moved %s to trash", msg.sourcePath)
 			m.status = "Moved to trash"
 			m.activePane().ClearMarks()
 		case opPermanentDelete:
+			log.Printf("[ACTION] opMsg: PermanentDelete done — sourcePath=%s", msg.sourcePath)
 			m.status = "Permanently deleted"
 			m.activePane().ClearMarks()
 		case opMkdir:
+			log.Printf("[ACTION] opMsg: Mkdir done — targetPath=%s", msg.targetPath)
 			m.status = fmt.Sprintf("Created %s", msg.targetPath)
+			dirName := filepath.Base(msg.targetPath)
+			if m.active == PaneLeft {
+				leftSelection = dirName
+			} else {
+				rightSelection = dirName
+			}
 		case opRename:
+			log.Printf("[ACTION] opMsg: Rename done — targetPath=%s", msg.targetPath)
 			m.status = fmt.Sprintf("Renamed to %s", filepath.Base(msg.targetPath))
+			if msg.targetPath != "" {
+				renamed := filepath.Base(msg.targetPath)
+				if m.active == PaneLeft {
+					leftSelection = renamed
+				} else {
+					rightSelection = renamed
+				}
+			}
 		case opEdit:
 			m.status = "Editor closed"
 			return m, tea.Batch(m.loadPreviewCmd(), enableMouseCmd())
@@ -359,29 +489,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.loadPreviewCmd(), enableMouseCmd())
 		}
 
-		leftSelection := selectedName(&m.left)
-		rightSelection := selectedName(&m.right)
-		if msg.kind == opRename && msg.targetPath != "" {
-			renamed := filepath.Base(msg.targetPath)
-			if m.active == PaneLeft {
-				leftSelection = renamed
-			} else {
-				rightSelection = renamed
+		// Reload panes — use remote reload for remote mounts
+		if m.left.InRemote() {
+			_ = m.reloadRemotePane(PaneLeft, leftSelection)
+		} else {
+			_ = m.reloadPane(PaneLeft, leftSelection)
+		}
+		if m.right.InRemote() {
+			_ = m.reloadRemotePane(PaneRight, rightSelection)
+		} else {
+			_ = m.reloadPane(PaneRight, rightSelection)
+		}
+
+		// For copy/move (including remote SFTP), position cursor on the
+		// newly created item in the passive (target) pane.
+		if (msg.kind == opCopy || msg.kind == opMove) && msg.targetPath != "" {
+			targetName := strings.ToLower(filepath.Base(msg.targetPath))
+			passive := m.passivePane()
+			if idx := vfs.FindSelected(passive.Entries, targetName); idx >= 0 {
+				passive.Cursor = idx
+				if passive.Offset > idx {
+					passive.Offset = idx
+				}
 			}
 		}
-		_ = m.reloadPane(PaneLeft, leftSelection)
-		_ = m.reloadPane(PaneRight, rightSelection)
+
 		return m, m.loadPreviewCmd()
 
 	case copyPlanMsg:
 		m.busy = false
 		if msg.err != nil {
+			log.Printf("[ERROR] copyPlanMsg: err=%v", msg.err)
 			m.status = msg.err.Error()
 			return m, nil
 		}
 
+		remoteInfo := ""
+		if msg.srcClient != nil {
+			remoteInfo = " source=remote"
+		}
+		if msg.dstClient != nil {
+			remoteInfo += " target=remote"
+		}
+		log.Printf("[PLAN] copyPlanMsg: kind=%d sources=%d files=%d size=%d targetDir=%s%s",
+			msg.kind, len(msg.sourcePaths), msg.stats.FilesTotal, msg.stats.BytesTotal, msg.targetDir, remoteInfo)
+
 		verb := operationVerb(msg.kind)
 		title := fmt.Sprintf("%s selected entry?", strings.Title(verb))
+		if msg.srcClient != nil || msg.dstClient != nil {
+			title = fmt.Sprintf("%s selected entry via SFTP?", strings.Title(verb))
+		}
 		body := strings.Join([]string{
 			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
 			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
@@ -395,19 +552,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			overwrite:       msg.overwrite,
 			existingTargets: msg.existingTargets,
 			stats:           msg.stats,
+			srcClient:       msg.srcClient,
+			dstClient:       msg.dstClient,
 		})
 		return m, nil
 
 	case deletePlanMsg:
 		m.busy = false
 		if msg.err != nil {
+			log.Printf("[ERROR] deletePlanMsg: err=%v", msg.err)
 			m.status = msg.err.Error()
 			return m, nil
 		}
 
+		log.Printf("[PLAN] deletePlanMsg: kind=%d sources=%d files=%d size=%d remote=%v",
+			msg.kind, len(msg.sourcePaths), msg.stats.FilesTotal, msg.stats.BytesTotal, msg.srcClient != nil)
+
 		title := "Move selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + " to trash?"
 		if msg.kind == opPermanentDelete {
 			title = "Permanently delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + "?"
+		} else if msg.srcClient != nil {
+			title = "Delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + " from remote?"
 		}
 		bodyLines := []string{
 			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
@@ -422,6 +587,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				kind:        msg.kind,
 				sourcePaths: append([]string(nil), msg.sourcePaths...),
 				stats:       msg.stats,
+				srcClient:   msg.srcClient,
 			},
 		)
 		return m, nil
@@ -429,9 +595,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case archivePlanMsg:
 		m.busy = false
 		if msg.err != nil {
+			log.Printf("[ERROR] archivePlanMsg: err=%v", msg.err)
 			m.status = msg.err.Error()
 			return m, nil
 		}
+
+		log.Printf("[PLAN] archivePlanMsg: sources=%d files=%d size=%d targetDir=%s",
+			len(msg.sourcePaths), msg.stats.FilesTotal, msg.stats.BytesTotal, msg.targetDir)
 
 		m.archiveFormat = "zip"
 		bodyLines := []string{
@@ -464,6 +634,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.archiveJob.background {
 			m.status = formatArchiveStatus(msg.progress)
 		}
+		log.Printf("[PROGRESS] archive: job=%d files=%d/%d bytes=%d/%d",
+			msg.jobID, msg.progress.FilesDone, msg.progress.FilesTotal,
+			msg.progress.BytesDone, msg.progress.BytesTotal)
 		return m, waitArchiveProgressCmd(m.archiveProgress)
 
 	case archiveDoneMsg:
@@ -473,6 +646,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.busy = false
 		if msg.err != nil {
+			log.Printf("[ERROR] archiveDoneMsg: job=%d err=%v", msg.jobID, msg.err)
 			activeSelection := selectedName(m.activePane())
 			_ = m.reloadPane(PaneLeft, activeSelection)
 			_ = m.reloadPane(PaneRight, activeSelection)
@@ -488,6 +662,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadPreviewCmd()
 		}
 
+		log.Printf("[DONE] archiveDoneMsg: job=%d targetPath=%s sources=%d", msg.jobID, msg.targetPath, len(msg.sourcePaths))
 		m.status = fmt.Sprintf("Archived %d entr%s to %s", len(msg.sourcePaths), pluralSuffix(len(msg.sourcePaths), "y", "ies"), msg.targetPath)
 		activeSelection := selectedName(m.activePane())
 		_ = m.reloadPane(PaneLeft, activeSelection)
@@ -523,6 +698,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.copyJob.background {
 			m.status = formatCopyStatus(m.copyJob.kind, msg.progress)
 		}
+		log.Printf("[PROGRESS] copy: job=%d kind=%d file=%s files=%d/%d bytes=%d/%d",
+			msg.jobID, m.copyJob.kind, msg.progress.CurrentPath,
+			msg.progress.FilesDone, msg.progress.FilesTotal,
+			msg.progress.BytesDone, msg.progress.BytesTotal)
 		return m, waitCopyProgressCmd(m.copyProgress)
 
 	case copyDoneMsg:
@@ -532,9 +711,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.busy = false
 		if msg.err != nil {
+			log.Printf("[ERROR] copyDoneMsg: job=%d kind=%d err=%v targetDir=%s",
+				msg.jobID, msg.kind, msg.err, msg.targetDir)
 			activeSelection := selectedName(m.activePane())
-			_ = m.reloadPane(PaneLeft, activeSelection)
-			_ = m.reloadPane(PaneRight, activeSelection)
+			if m.left.InRemote() {
+				_ = m.reloadRemotePane(PaneLeft, activeSelection)
+			} else {
+				_ = m.reloadPane(PaneLeft, activeSelection)
+			}
+			if m.right.InRemote() {
+				_ = m.reloadRemotePane(PaneRight, activeSelection)
+			} else {
+				_ = m.reloadPane(PaneRight, activeSelection)
+			}
 			if msg.err == context.Canceled {
 				m.status = strings.Title(operationVerb(msg.kind)) + " cancelled"
 			} else {
@@ -547,10 +736,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadPreviewCmd()
 		}
 
+		log.Printf("[DONE] copyDoneMsg: job=%d kind=%d targetDir=%s sources=%d",
+			msg.jobID, msg.kind, msg.targetDir, len(msg.sourcePaths))
 		m.status = fmt.Sprintf("%s %d entr%s to %s", operationDoneLabel(msg.kind), len(msg.sourcePaths), pluralSuffix(len(msg.sourcePaths), "y", "ies"), msg.targetDir)
 		activeSelection := selectedName(m.activePane())
-		_ = m.reloadPane(PaneLeft, activeSelection)
-		_ = m.reloadPane(PaneRight, activeSelection)
+		if m.left.InRemote() {
+			_ = m.reloadRemotePane(PaneLeft, activeSelection)
+		} else {
+			_ = m.reloadPane(PaneLeft, activeSelection)
+		}
+		if m.right.InRemote() {
+			_ = m.reloadRemotePane(PaneRight, activeSelection)
+		} else {
+			_ = m.reloadPane(PaneRight, activeSelection)
+		}
+
+		// Position cursor on the newly created item in the passive (target) pane
+		if (msg.kind == opCopy || msg.kind == opMove) && msg.targetPath != "" {
+			targetName := strings.ToLower(filepath.Base(msg.targetPath))
+			passive := m.passivePane()
+			if idx := vfs.FindSelected(passive.Entries, targetName); idx >= 0 {
+				passive.Cursor = idx
+				if passive.Offset > idx {
+					passive.Offset = idx
+				}
+			}
+		}
+
 		background := m.copyJob.background
 		kind := m.copyJob.kind
 		sourceCount := len(m.copyJob.sourcePaths)
@@ -756,6 +968,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.filterMode {
 			switch {
 			case msg.String() == "esc":
+				log.Printf("[KEY] Filter: Esc — clear filter")
 				m.filterQuery = ""
 				m.filterInput.SetValue("")
 				m.filterInput.Blur()
@@ -763,6 +976,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "Filter cleared"
 				return m, nil
 			case key.Matches(msg, m.keys.Confirm):
+				log.Printf("[KEY] Filter: Enter — query=%s", m.filterQuery)
 				m.filterMode = false
 				m.filterInput.Blur()
 				m.status = fmt.Sprintf("Filter: %s", m.filterQuery)
@@ -790,6 +1004,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Toggle filter mode — attaches filter to the currently active pane
 		if key.Matches(msg, m.keys.Filter) {
+			log.Printf("[KEY] Filter toggle — pane=%s", m.active)
 			m.filterMode = true
 			m.filterPaneID = m.active
 			m.filterInput.Focus()
@@ -798,25 +1013,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Log pane state for every key event
+		activePane := m.activePane()
+		remotePrefix := ""
+		if activePane.InRemote() {
+			remotePrefix = " [REMOTE]"
+		}
+		_ = remotePrefix // used in logs below
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
+			log.Printf("[KEY] Quit — exiting application")
 			m.cleanupArchiveMounts()
 			m.cleanupImageOverlay()
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Help):
+			log.Printf("[KEY] Help — open help modal")
 			m.openHelpModal()
 			return m, nil
 		case key.Matches(msg, m.keys.Rename):
+			log.Printf("[KEY] Rename — active=%s", m.active)
 			m.openRenameModal()
 			return m, nil
 		case key.Matches(msg, m.keys.Cancel), msg.String() == "q":
-			// Esc on the pane where filter is active clears it.
 			if m.filterQuery != "" && m.filterPaneID == m.active {
+				log.Printf("[KEY] Esc — clear filter (active=%s)", m.active)
 				m.clearFilter()
 				m.status = "Filter cleared"
 				return m, nil
 			}
 			if m.infoMode {
+				log.Printf("[KEY] Esc/q — close info pane")
 				m.infoMode = false
 				m.selectMode = false
 				m.cursorMode = false
@@ -826,6 +1053,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if len(m.activePane().MarkedEntries()) > 0 {
+				log.Printf("[KEY] Esc — clear selection (%d items)", len(m.activePane().MarkedEntries()))
 				m.activePane().ClearMarks()
 				m.status = "Selection cleared"
 				return m, m.loadPreviewCmd()
@@ -834,9 +1062,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.View):
 			return m.handleView()
 		case key.Matches(msg, m.keys.Caret):
+			log.Printf("[KEY] Caret mode toggle")
 			return m.toggleCaretMode()
 		case key.Matches(msg, m.keys.Visual):
 			if m.cursorMode {
+				log.Printf("[KEY] Visual mode toggle")
 				return m.toggleVisualMode()
 			}
 			return m, nil
@@ -845,16 +1075,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Archive):
 			return m.handleArchive()
 		case key.Matches(msg, m.keys.Info):
+			log.Printf("[KEY] Info toggle")
 			return m.toggleInfo()
 		case key.Matches(msg, m.keys.SelectText):
+			log.Printf("[KEY] SelectText toggle")
 			return m.toggleSelectMode()
 		case key.Matches(msg, m.keys.ToggleHidden):
+			log.Printf("[KEY] Toggle hidden files")
 			return m.toggleHidden()
 		case key.Matches(msg, m.keys.CycleTheme):
+			log.Printf("[KEY] Cycle theme")
 			return m.cycleTheme()
 		case key.Matches(msg, m.keys.CycleSort):
+			log.Printf("[KEY] Cycle sort")
 			return m.cycleSort()
 		case key.Matches(msg, m.keys.Switch):
+			nextPane := PaneRight
+			if m.active == PaneRight {
+				nextPane = PaneLeft
+			}
+			log.Printf("[KEY] Switch pane — was=%s now=%s", m.active, nextPane)
 			m.left.ClearMarks()
 			m.right.ClearMarks()
 			if m.active == PaneLeft {
@@ -885,29 +1125,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Open):
 			return m.handleOpenSelected()
 		case key.Matches(msg, m.keys.Back):
+			log.Printf("[KEY] Back (goParent) — pane=%s path=%s", m.active, activePane.Path)
 			if err := m.goParent(); err != nil {
 				m.status = err.Error()
 			}
 			return m, m.loadPreviewCmd()
 		case key.Matches(msg, m.keys.HistoryBack):
+			log.Printf("[KEY] HistoryBack — pane=%s", m.active)
 			return m.historyBack()
 		case key.Matches(msg, m.keys.HistoryForward):
+			log.Printf("[KEY] HistoryForward — pane=%s", m.active)
 			return m.historyForward()
 		case key.Matches(msg, m.keys.Refresh):
+			log.Printf("[KEY] Refresh all panes")
 			return m.refreshAllPanes("Refreshed")
 		case key.Matches(msg, m.keys.DirSize):
 			return m.handleDirSize()
 		case key.Matches(msg, m.keys.Copy):
+			log.Printf("[KEY] Copy (F5) — active=%s path=%s%s", m.active, activePane.Path, remotePrefix)
 			return m.handleTransfer(opCopy)
 		case key.Matches(msg, m.keys.Move):
+			log.Printf("[KEY] Move (F6) — active=%s path=%s%s", m.active, activePane.Path, remotePrefix)
 			return m.handleTransfer(opMove)
 		case key.Matches(msg, m.keys.Mkdir):
+			log.Printf("[KEY] Mkdir (F7) — active=%s path=%s%s", m.active, activePane.Path, remotePrefix)
 			m.openMkdirModal()
 			return m, nil
 		case key.Matches(msg, m.keys.Delete):
 			return m.handleDelete()
 		case key.Matches(msg, m.keys.PermanentDelete):
 			return m.handlePermanentDelete()
+		case key.Matches(msg, m.keys.SSH):
+			log.Printf("[KEY] SSH toggle — active=%s path=%s", m.active, activePane.Path)
+			return m.handleSSHToggle()
 		}
 
 	case tea.MouseMsg:
@@ -984,7 +1234,7 @@ func (m Model) View() string {
 		)
 	}
 
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 3)
 	parts = append(parts, panels)
 	if m.filterMode {
 		parts = append(parts, renderFilterBar(m))
@@ -1019,6 +1269,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modalMkdir, modalRename:
 		switch {
 		case msg.String() == "esc":
+			log.Printf("[MODAL] %s — cancelled (Esc)", m.modal.kind)
 			m.modal = modalState{}
 			m.status = "Cancelled"
 			return m, nil
@@ -1034,7 +1285,8 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.busy = true
 			if m.modal.kind == modalMkdir {
-				return m, mkdirCmd(m.activePane().Path, value)
+				log.Printf("[MODAL] Mkdir confirmed — path=%s name=%s", m.activePane().Path, value)
+				return m, m.mkdirCmd(m.activePane().Path, value)
 			}
 			selected, ok := m.activePane().Selected()
 			if !ok || selected.IsParent {
@@ -1043,6 +1295,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "No entry selected"
 				return m, nil
 			}
+			log.Printf("[MODAL] Rename confirmed — src=%s new=%s", selected.Path, value)
 			return m, renameCmd(selected.Path, value)
 		}
 
@@ -1053,6 +1306,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modalConfirm:
 		switch {
 		case isModalCloseKey(msg, m.keys):
+			log.Printf("[MODAL] Confirm — cancelled (Esc)")
 			m.modal = modalState{}
 			m.status = "Cancelled"
 			return m, nil
@@ -1064,21 +1318,59 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			pending := *m.modal.pending
 			m.modal = modalState{}
+
 			if pending.kind == opCopy || pending.kind == opMove {
+				// Remote copy/move
+				if pending.srcClient != nil || pending.dstClient != nil {
+					if m.copyJob != nil {
+						m.status = "Transfer is already running"
+						return m, nil
+					}
+					m.busy = true
+					sourceIsRemote := pending.srcClient != nil
+					targetIsRemote := pending.dstClient != nil
+					log.Printf("[MODAL] Confirm — remote %s sources=%d targetDir=%s srcRemote=%v dstRemote=%v",
+						operationVerb(pending.kind), len(pending.sourcePaths), pending.targetDir, sourceIsRemote, targetIsRemote)
+					return m, m.startRemoteCopyJob(pending.kind, pending.sourcePaths, pending.targetDir,
+						sourceIsRemote, targetIsRemote, pending.srcClient, pending.dstClient, pending.stats)
+				}
+				// Local copy/move
 				if m.copyJob != nil {
 					m.status = "Transfer is already running"
 					return m, nil
 				}
 				m.busy = true
+				log.Printf("[MODAL] Confirm — local %s sources=%d targetDir=%s overwrite=%v stats=%+v",
+					operationVerb(pending.kind), len(pending.sourcePaths), pending.targetDir, pending.overwrite, pending.stats)
 				return m, m.startCopyJob(pending.kind, pending.sourcePaths, pending.targetDir, pending.overwrite, pending.stats)
 			}
+
+			// SSH host delete (no busy state — simple store operation)
+			if pending.kind == opDeleteHost {
+				hostName := ""
+				if len(pending.sourcePaths) > 0 {
+					hostName = pending.sourcePaths[0]
+				}
+				log.Printf("[MODAL] Confirm — SSH host delete: %q", hostName)
+				return m.executeSSHHostDelete(hostName)
+			}
+
+			// Remote delete
+			if pending.srcClient != nil {
+				m.busy = true
+				log.Printf("[MODAL] Confirm — remote delete sources=%d", len(pending.sourcePaths))
+				return m, m.remoteDeleteCmd(pending.sourcePaths, pending.srcClient)
+			}
+
 			m.busy = true
+			log.Printf("[MODAL] Confirm — %s sources=%d", operationVerb(pending.kind), len(pending.sourcePaths))
 			return m, pending.cmd()
 		}
 
 	case modalArchiveType:
 		switch {
 		case isModalCloseKey(msg, m.keys):
+			log.Printf("[MODAL] Archive — cancelled (Esc)")
 			m.modal = modalState{}
 			m.status = "Cancelled"
 			return m, nil
@@ -1095,6 +1387,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.busy = true
+			log.Printf("[MODAL] Archive confirmed — sources=%d targetDir=%s format=%s", len(pending.sourcePaths), pending.targetDir, m.archiveFormat)
 			return m, m.startArchiveJob(pending.sourcePaths, pending.targetDir, m.archiveFormat, pending.stats)
 		case msg.String() == "f":
 			switch m.archiveFormat {
@@ -1113,6 +1406,44 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case modalSSHConnect:
+		switch {
+		case isModalCloseKey(msg, m.keys):
+			log.Printf("[MODAL] SSH connect — cancelled (Esc)")
+			m.modal = modalState{}
+			if m.ssh != nil && m.ssh.testingConn {
+				m.ssh.testingConn = false
+				if m.ssh.cancelTest != nil {
+					m.ssh.cancelTest()
+				}
+				m.busy = false
+			}
+			m.status = "Cancelled"
+			return m, nil
+		case key.Matches(msg, m.keys.Confirm):
+			// If a test is already in progress, ignore
+			if m.ssh != nil && m.ssh.testingConn {
+				return m, nil
+			}
+			return m.handleSSHAddHostConfirm()
+		case msg.String() == "tab":
+			m.ssh.cycleInput(1)
+			return m, nil
+		case msg.String() == "shift+tab":
+			m.ssh.cycleInput(-1)
+			return m, nil
+		case key.Matches(msg, m.keys.Help):
+			m.ssh.showHelp = !m.ssh.showHelp
+			return m, nil
+		case msg.String() == "?":
+			m.ssh.showHelp = !m.ssh.showHelp
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.ssh.inputs[m.ssh.inputFocus], cmd = m.ssh.inputs[m.ssh.inputFocus].Update(msg)
+			return m, cmd
+		}
+
 	case modalArchiveProgress:
 		if key.Matches(msg, m.keys.Background) {
 			if m.archiveJob == nil {
@@ -1122,6 +1453,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.archiveJob.background = true
 			m.modal = modalState{}
 			m.status = "Archive continues in background"
+			log.Printf("[MODAL] ArchiveProgress — moved to background (job=%d)", m.archiveJob.id)
 			return m, nil
 		}
 		if key.Matches(msg, m.keys.ProgressCancel) {
@@ -1133,6 +1465,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.archiveJob.cancel()
 			}
 			m.status = "Archiving cancelling..."
+			log.Printf("[MODAL] ArchiveProgress — cancel requested (job=%d)", m.archiveJob.id)
 			return m, nil
 		}
 		return m, nil
@@ -1191,15 +1524,18 @@ func (m *Model) reloadPane(id PaneID, preserve string) error {
 		SortReverse: m.cfg.Browser.Sort.Reverse,
 	})
 	if err != nil {
+		log.Printf("[ERROR] reloadPane: id=%s path=%s err=%v", id, pane.Path, err)
 		return err
 	}
 	pane.SetEntries(entries, strings.ToLower(preserve))
+	log.Printf("[PANEL] reloadPane: id=%s path=%s entries=%d preserve=%s", id, pane.Path, len(entries), preserve)
 	return nil
 }
 
 func (m *Model) refreshAllPanes(status string) (tea.Model, tea.Cmd) {
 	leftSelected := selectedName(&m.left)
 	rightSelected := selectedName(&m.right)
+	log.Printf("[PANEL] refreshAllPanes: left=%s right=%s", leftSelected, rightSelected)
 	if err := m.reloadPane(PaneLeft, leftSelected); err != nil {
 		m.status = err.Error()
 		return m, nil
@@ -1393,6 +1729,7 @@ func (m *Model) enterSelected() error {
 	}
 	// Save current directory to history before navigating.
 	pane.PushHistory(pane.Path)
+	log.Printf("[NAV] enterSelected — pane=%s from=%s to=%s", pane.ID, pane.Path, selected.Path)
 	pane.Path = selected.Path
 	if err := m.reloadPane(pane.ID, selected.Name); err != nil {
 		return err
@@ -1412,8 +1749,12 @@ func (m *Model) clearFilter() {
 func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 	selected, ok := m.activePane().Selected()
 	if !ok {
+		log.Printf("[ACTION] OpenSelected — nothing selected")
 		return m, nil
 	}
+
+	log.Printf("[ACTION] OpenSelected — entry=%s isDir=%v isRemote=%v isArchive=%v category=%s",
+		selected.Path, selected.IsDir, selected.IsRemote, isArchiveEntry(selected), selected.Category())
 
 	// Navigating up via ".." — use goParent which preserves the cursor
 	// position on the directory/archive we came from (by finding its name
@@ -1428,7 +1769,21 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 		return m, m.loadPreviewCmd()
 	}
 
+	// SSH host entry — connect to remote host
+	if selected.IsRemote && !isRemoteAddHostEntry(selected) {
+		log.Printf("[ACTION] OpenSelected — SSH connect to host=%s", selected.RemoteHostName)
+		return m.handleSSHConnectHost()
+	}
+	// "Add host" entry — open connect dialog
+	if isRemoteAddHostEntry(selected) {
+		m.handleSSHOpenAddHost()
+		return m, nil
+	}
+
 	if selected.IsDir {
+		if m.activePane().InRemote() {
+			return m.enterRemoteDir(selected)
+		}
 		if err := m.enterSelected(); err != nil {
 			m.status = err.Error()
 			return m, nil
@@ -1457,13 +1812,54 @@ func (m *Model) handleOpenSelected() (tea.Model, tea.Cmd) {
 func (m *Model) goParent() error {
 	m.hover = hoverState{}
 	pane := m.activePane()
+	log.Printf("[NAV] goParent — pane=%s path=%s inRemote=%v inArchive=%v", pane.ID, pane.Path, pane.InRemote(), pane.InArchive())
+
+	// SSH host list — close it and restore previous directory
+	if pane.Path == "ssh://" {
+		if prevPath, ok := pane.PopHistory(); ok {
+			log.Printf("[NAV] goParent — closing SSH host list, restoring path=%s", prevPath)
+			pane.Path = prevPath
+			return m.reloadPane(pane.ID, "")
+		}
+		// No history — just clear the host list
+		pane.Path = "/"
+		return m.reloadPane(pane.ID, "")
+	}
+
+	// Remote mount — pop back to host list or go up one level
+	if mount, ok := pane.CurrentRemote(); ok {
+		current := pane.Path
+		if current == "/" || current == "" {
+			// At remote root — pop remote, disconnect, and return to host list
+			log.Printf("[NAV] goParent — closing remote mount, returning to host list")
+			pane.PopRemote()
+			mount.Client.Close()
+			if m.ssh != nil {
+				m.ssh.connectedHosts[mount.Host.Name] = false
+				entries := buildSSHHostEntries(m.ssh.store, m.ssh.connectedHosts)
+				pane.SetEntries(entries, "")
+				pane.Path = "ssh://"
+				m.status = "SSH host list"
+			}
+			return nil
+		}
+		// Inside remote subdirectory — go up one level
+		pane.PushHistory(pane.Path)
+		parent := path.Dir(current)
+		if parent == "." {
+			parent = "/"
+		}
+		log.Printf("[NAV] goParent — remote: %s -> %s", current, parent)
+		pane.Path = parent
+		return m.reloadRemotePane(pane.ID, path.Base(current))
+	}
 
 	if mount, ok := pane.CurrentArchive(); ok {
 		root := filepath.Clean(mount.RootPath)
 		current := filepath.Clean(pane.Path)
 		if current == root {
 			// At archive root — pop archive and return to the directory containing it
-			// Save current path to history before leaving so forward can restore it.
+			log.Printf("[NAV] goParent — closing archive %s", mount.SourcePath)
 			pane.PushHistory(pane.Path)
 			if _, popped := pane.PopArchive(); popped {
 				_ = os.RemoveAll(mount.TempDir)
@@ -1478,6 +1874,7 @@ func (m *Model) goParent() error {
 		// Inside archive subdirectory — go up one level within the archive
 		pane.PushHistory(pane.Path)
 		parent := filepath.Dir(current)
+		log.Printf("[NAV] goParent — archive: %s -> %s", current, parent)
 		pane.Path = parent
 		if err := m.reloadPane(pane.ID, filepath.Base(current)); err != nil {
 			return err
@@ -1492,6 +1889,7 @@ func (m *Model) goParent() error {
 	}
 	pane.PushHistory(pane.Path)
 	currentName := filepath.Base(pane.Path)
+	log.Printf("[NAV] goParent — local: %s -> %s", pane.Path, parent)
 	pane.Path = parent
 	if err := m.reloadPane(pane.ID, currentName); err != nil {
 		return err
@@ -1510,6 +1908,7 @@ func (m *Model) historyBack() (tea.Model, tea.Cmd) {
 	}
 	// Save current path to forward-stack so forward navigation can restore it.
 	pane.PushFuture(pane.Path)
+	log.Printf("[NAV] historyBack — pane=%s cur=%s prev=%s", pane.ID, pane.Path, prevPath)
 	pane.Path = prevPath
 	pane.Cursor = 0
 	pane.Offset = 0
@@ -1531,6 +1930,7 @@ func (m *Model) historyForward() (tea.Model, tea.Cmd) {
 	}
 	// Save current path to back-stack so back navigation can restore it.
 	pane.PushHistory(pane.Path)
+	log.Printf("[NAV] historyForward — pane=%s cur=%s next=%s", pane.ID, pane.Path, nextPath)
 	pane.Path = nextPath
 	pane.Cursor = 0
 	pane.Offset = 0
@@ -1552,6 +1952,58 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 					Kind:  vfs.PreviewKindEmpty,
 					Title: "Nothing selected",
 					Body:  "No entry selected.",
+				},
+			}
+		}
+	}
+
+	// Remote preview: read file via SFTP and build a text preview
+	if mount, ok := m.activePane().CurrentRemote(); ok {
+		return func() tea.Msg {
+			rc, err := mount.Client.ReadFile(selected.Path)
+			if err != nil {
+				return previewMsg{
+					entryPath: selected.Path,
+					preview: vfs.Preview{
+						Kind:  vfs.PreviewKindError,
+						Title: selected.DisplayName(),
+						Body:  fmt.Sprintf("Could not read remote file:\n\n%s", err),
+					},
+				}
+			}
+			defer rc.Close()
+			maxBytes := int64(m.cfg.Preview.MaxPreviewBytes)
+			limited := io.LimitReader(rc, maxBytes)
+			raw, readErr := io.ReadAll(limited)
+			if readErr != nil {
+				return previewMsg{
+					entryPath: selected.Path,
+					preview: vfs.Preview{
+						Kind:  vfs.PreviewKindError,
+						Title: selected.DisplayName(),
+						Body:  fmt.Sprintf("Could not read remote file:\n\n%s", readErr),
+					},
+				}
+			}
+			body := string(raw)
+			if int64(len(raw)) >= maxBytes {
+				body += "\n\n[... truncated ...]"
+			}
+			return previewMsg{
+				entryPath: selected.Path,
+				preview: vfs.Preview{
+					Kind:      vfs.PreviewKindText,
+					Title:     selected.DisplayName(),
+					Body:      body,
+					PlainBody: body,
+					Metadata: vfs.Metadata{
+						Path:        selected.Path,
+						Size:        selected.Size,
+						SizeKnown:   true,
+						Extension:   selected.Extension,
+						Permissions: vfs.Permissions(selected.Mode),
+						ModifiedAt:  vfs.ShortTime(selected.ModifiedAt),
+					},
 				},
 			}
 		}
@@ -1592,6 +2044,7 @@ func (m *Model) handleDirSize() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	log.Printf("[ACTION] DirSize: path=%s pane=%s", selected.Path, m.active)
 	m.busy = true
 	m.status = fmt.Sprintf("Calculating directory size for %s", selected.DisplayName())
 	return m, dirSizeCmd(selected.Path)
@@ -1599,22 +2052,50 @@ func (m *Model) handleDirSize() (tea.Model, tea.Cmd) {
 
 func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 	if m.activePane().InArchive() && kind != opCopy {
+		log.Printf("[SKIP] Transfer: archive read-only, kind=%d", kind)
 		m.status = "Archive mode is read-only; only copy is allowed"
 		return m, nil
 	}
 
 	sources := m.operationSources()
 	if len(sources) == 0 {
+		log.Printf("[SKIP] Transfer: no sources, kind=%d", kind)
 		m.status = fmt.Sprintf("Nothing to %s", operationVerb(kind))
 		return m, nil
 	}
 
-	targetDir := m.passivePane().Path
+	srcPane := m.activePane()
+	dstPane := m.passivePane()
+	targetDir := dstPane.Path
+
+	srcRemote, srcHasRemote := srcPane.CurrentRemote()
+	dstRemote, dstHasRemote := dstPane.CurrentRemote()
+
+	log.Printf("[ACTION] Transfer: kind=%d active=%s srcPath=%s dstPath=%s srcRemote=%v dstRemote=%v sources=%v",
+		kind, m.active, srcPane.Path, dstPane.Path, srcHasRemote, dstHasRemote, sources)
+
+	// Remote-involved transfer (Local↔Remote or Remote→Remote)
+	if srcHasRemote || dstHasRemote {
+		if m.copyJob != nil {
+			log.Printf("[SKIP] Transfer: already running (remote)")
+			m.status = "Transfer is already running"
+			return m, nil
+		}
+
+		log.Printf("[ACTION] Transfer: remote copyPlan — targetDir=%s", targetDir)
+		m.busy = true
+		m.status = fmt.Sprintf("Calculating %s size", operationVerb(kind))
+		return m, m.remoteCopyPlanCmd(kind, sources, targetDir,
+			srcHasRemote, dstHasRemote, srcRemote.Client, dstRemote.Client)
+	}
+
+	// Local-only transfer (existing logic)
 	existingTargets := 0
 	for _, sourcePath := range sources {
 		targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
 		exists, err := vfs.PathExists(targetPath)
 		if err != nil {
+			log.Printf("[ERROR] Transfer: path check failed: %s err=%v", targetPath, err)
 			m.status = err.Error()
 			return m, nil
 		}
@@ -1625,6 +2106,7 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 
 	if kind == opCopy || kind == opMove {
 		if m.copyJob != nil {
+			log.Printf("[SKIP] Transfer: already running (local)")
 			m.status = "Transfer is already running"
 			return m, nil
 		}
@@ -1633,6 +2115,7 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 		if existingTargets > 0 && !m.cfg.Behavior.ConfirmOverwrite {
 			overwrite = true
 		}
+		log.Printf("[ACTION] Transfer: local copyPlan — targetDir=%s existingTargets=%d overwrite=%v", targetDir, existingTargets, overwrite)
 		m.busy = true
 		m.status = fmt.Sprintf("Calculating %s size", operationVerb(kind))
 		return m, copyPlanCmd(kind, sources, targetDir, overwrite, existingTargets)
@@ -1643,15 +2126,18 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 func (m *Model) handleArchive() (tea.Model, tea.Cmd) {
 	sources := m.operationSources()
 	if len(sources) == 0 {
+		log.Printf("[SKIP] Archive: no sources")
 		m.status = "Nothing to archive"
 		return m, nil
 	}
 
 	if m.archiveJob != nil {
+		log.Printf("[SKIP] Archive: already running")
 		m.status = "Archive is already running"
 		return m, nil
 	}
 
+	log.Printf("[ACTION] Archive: sources=%d targetDir=%s", len(sources), m.passivePane().Path)
 	m.busy = true
 	m.status = "Calculating archive size"
 	return m, archivePlanCmd(sources, m.passivePane().Path)
@@ -1659,21 +2145,41 @@ func (m *Model) handleArchive() (tea.Model, tea.Cmd) {
 
 func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 	if m.activePane().InArchive() {
+		log.Printf("[SKIP] Delete: archive read-only")
 		m.status = "Archive mode is read-only; delete is disabled"
 		return m, nil
 	}
 
+	// SSH host list — delete user-added hosts
+	if m.activePane().Path == "ssh://" {
+		return m.handleSSHHostDelete()
+	}
+
 	sources := m.operationSources()
 	if len(sources) == 0 {
+		log.Printf("[SKIP] Delete: no sources")
 		m.status = "Nothing to delete"
 		return m, nil
 	}
+
+	log.Printf("[ACTION] Delete: sources=%v remote=%v", sources, m.activePane().InRemote())
+
+	// Remote delete via SFTP (no trash on remote)
+	if mount, ok := m.activePane().CurrentRemote(); ok {
+		log.Printf("[ACTION] Delete: remote — sources=%v", sources)
+		m.busy = true
+		m.status = "Calculating delete size"
+		return m, m.remoteDeletePlanCmd(sources, mount.Client)
+	}
+
 	if !m.cfg.Behavior.ConfirmDelete {
+		log.Printf("[ACTION] Delete: immediate trash — sources=%v", sources)
 		m.busy = true
 		m.status = fmt.Sprintf("Moving %d entr%s to trash", len(sources), pluralSuffix(len(sources), "y", "ies"))
 		return m, trashPathsCmd(sources)
 	}
 
+	log.Printf("[ACTION] Delete: plan — sources=%v", sources)
 	m.busy = true
 	m.status = "Calculating trash size"
 	return m, trashPlanCmd(sources)
@@ -1681,15 +2187,23 @@ func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 
 func (m *Model) handlePermanentDelete() (tea.Model, tea.Cmd) {
 	if m.activePane().InArchive() {
+		log.Printf("[SKIP] PermanentDelete: archive read-only")
 		m.status = "Archive mode is read-only; permanent delete is disabled"
 		return m, nil
 	}
 
+	// SSH host list — delete user-added hosts (same as F8)
+	if m.activePane().Path == "ssh://" {
+		return m.handleSSHHostDelete()
+	}
+
 	sources := m.operationSources()
 	if len(sources) == 0 {
+		log.Printf("[SKIP] PermanentDelete: no sources")
 		m.status = "Nothing to delete"
 		return m, nil
 	}
+	log.Printf("[ACTION] PermanentDelete: sources=%v confirm=%v", sources, m.cfg.Behavior.ConfirmDelete)
 	if !m.cfg.Behavior.ConfirmDelete {
 		m.busy = true
 		m.status = fmt.Sprintf("Permanently deleting %d entr%s", len(sources), pluralSuffix(len(sources), "y", "ies"))
@@ -1704,13 +2218,16 @@ func (m *Model) handlePermanentDelete() (tea.Model, tea.Cmd) {
 func (m *Model) handleView() (tea.Model, tea.Cmd) {
 	selected, ok := m.activePane().Selected()
 	if !ok || selected.IsParent || selected.IsDir {
+		log.Printf("[SKIP] View: no valid selection (ok=%v isParent=%v isDir=%v)", ok, selected.IsParent, selected.IsDir)
 		m.status = "Select a file to view"
 		return m, nil
 	}
 	if m.viewMode {
+		log.Printf("[ACTION] View: exit view mode")
 		return m.exitViewMode()
 	}
 
+	log.Printf("[ACTION] View: file=%s", selected.Path)
 	m.viewPrevInfo = m.infoMode
 	m.infoMode = true
 	m.selectMode = m.previewData.Kind == vfs.PreviewKindText
@@ -1729,6 +2246,7 @@ func (m *Model) exitViewMode() (tea.Model, tea.Cmd) {
 	if !m.viewMode {
 		return m, nil
 	}
+	log.Printf("[ACTION] exitViewMode")
 	m.viewMode = false
 	m.selectMode = false
 	m.visualMode = false
@@ -1752,6 +2270,7 @@ func (m *Model) handleOpenExternal() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	log.Printf("[ACTION] OpenExternal: file=%s opener=%s", selected.Path, name)
 	m.cleanupImageOverlay()
 	m.status = fmt.Sprintf("Opening %s with %s", selected.DisplayName(), name)
 	return m, startExternalOpenCmd(command, selected.Path)
@@ -1770,6 +2289,7 @@ func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	log.Printf("[ACTION] Edit: file=%s editor=%s command=%v", selected.Path, name, command)
 	m.cleanupImageOverlay()
 	m.status = fmt.Sprintf("Opening %s with %s", selected.DisplayName(), name)
 	return m, tea.ExecProcess(command, func(err error) tea.Msg {
@@ -1778,6 +2298,7 @@ func (m *Model) handleEdit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleExecute(entry vfs.Entry) (tea.Model, tea.Cmd) {
+	log.Printf("[ACTION] Execute: path=%s", entry.Path)
 	m.cleanupImageOverlay()
 	cmd := exec.Command(entry.Path)
 	cmd.Dir = filepath.Dir(entry.Path)
@@ -1825,6 +2346,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(1)
 		return m, m.loadPreviewCmd()
 	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
+		log.Printf("[MOUSE] Left click at (%d,%d)", msg.X, msg.Y)
 		if m.copyPath != "" && m.mouseOverPathLine(msg.X, msg.Y) {
 			if err := clipboard.WriteAll(m.copyPath); err != nil {
 				m.status = fmt.Sprintf("Copy path error: %v", err)
@@ -1908,6 +2430,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) toggleInfo() (tea.Model, tea.Cmd) {
 	m.infoMode = !m.infoMode
+	log.Printf("[TOGGLE] Info mode: %v (active=%s)", m.infoMode, m.active)
 	m.resizePreview()
 	m.syncPreviewContent()
 	if m.infoMode {
@@ -1938,6 +2461,7 @@ func (m *Model) toggleSelectMode() (tea.Model, tea.Cmd) {
 	}
 	if m.selectMode {
 		m.selectMode = false
+		log.Printf("[TOGGLE] Select mode: off")
 		m.status = "Text selection mode: off"
 		return m, enableMouseCmd()
 	}
@@ -1946,6 +2470,7 @@ func (m *Model) toggleSelectMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.selectMode = true
+	log.Printf("[TOGGLE] Select mode: on")
 	m.status = "Text selection mode: on"
 	return m, disableMouseCmd()
 }
@@ -1964,6 +2489,7 @@ func (m *Model) toggleCaretMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.cursorMode {
+		log.Printf("[TOGGLE] Caret mode: off")
 		return m.exitCaretMode("Caret mode: off")
 	}
 
@@ -1978,6 +2504,7 @@ func (m *Model) toggleCaretMode() (tea.Model, tea.Cmd) {
 	m.visualMode = false
 	m.ensureTextCursorVisible()
 	m.syncPreviewContent()
+	log.Printf("[TOGGLE] Caret mode: on (line=%d col=%d)", m.cursorLine, m.cursorCol)
 	m.status = "Caret mode: h/j/k/l move, v select, Esc exit"
 	return m, nil
 }
@@ -1987,6 +2514,7 @@ func (m *Model) exitCaretMode(status string) (tea.Model, tea.Cmd) {
 		m.status = status
 		return m, nil
 	}
+	log.Printf("[TOGGLE] exitCaretMode: %s", status)
 	m.cursorMode = false
 	m.visualMode = false
 	m.syncPreviewContent()
@@ -2008,6 +2536,7 @@ func (m *Model) toggleVisualMode() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.visualMode {
+		log.Printf("[TOGGLE] Visual mode: off")
 		return m.exitVisualMode("Visual mode: off")
 	}
 
@@ -2029,6 +2558,7 @@ func (m *Model) toggleVisualMode() (tea.Model, tea.Cmd) {
 	m.visualAnchorCol = m.cursorCol
 	m.ensureTextCursorVisible()
 	m.syncPreviewContent()
+	log.Printf("[TOGGLE] Visual mode: on (anchor=%d col=%d)", m.visualAnchor, m.visualAnchorCol)
 	m.status = "Visual mode: h/j/k/l move, y copy, Esc exit"
 	return m, nil
 }
@@ -2038,6 +2568,7 @@ func (m *Model) exitVisualMode(status string) (tea.Model, tea.Cmd) {
 		m.status = status
 		return m, nil
 	}
+	log.Printf("[TOGGLE] exitVisualMode: %s", status)
 	m.visualMode = false
 	m.syncPreviewContent()
 	m.status = status
@@ -2046,6 +2577,7 @@ func (m *Model) exitVisualMode(status string) (tea.Model, tea.Cmd) {
 
 func (m *Model) toggleHidden() (tea.Model, tea.Cmd) {
 	m.cfg.Browser.ShowHidden = !m.cfg.Browser.ShowHidden
+	log.Printf("[TOGGLE] ShowHidden: %v", m.cfg.Browser.ShowHidden)
 	return m.refreshAllPanes(fmt.Sprintf("Show hidden: %t", m.cfg.Browser.ShowHidden))
 }
 
@@ -2056,6 +2588,7 @@ func (m *Model) cycleTheme() (tea.Model, tea.Cmd) {
 		m.status = err.Error()
 		return m, nil
 	}
+	log.Printf("[TOGGLE] CycleTheme: %s -> %s", m.cfg.UI.Theme, next)
 	m.cfg.UI.Theme = next
 	m.palette = palette
 	savedPath, saveErr := config.Save(m.cfg, m.configPath)
@@ -2142,6 +2675,7 @@ func (m *Model) cycleSort() (tea.Model, tea.Cmd) {
 			break
 		}
 	}
+	log.Printf("[TOGGLE] CycleSort: %s -> %s", current, next)
 	m.cfg.Browser.Sort.By = next
 	return m.refreshAllPanes(fmt.Sprintf("Sort: %s", next))
 }
@@ -2856,25 +3390,6 @@ func renderTitleBar(m Model) string {
 	return left + center + fill + right
 }
 
-func renderStatus(m Model) string {
-	active := m.activePane()
-	selected, _ := active.Selected()
-	summary := fmt.Sprintf(
-		"%s | %s | items:%d | selected:%s",
-		strings.ToUpper(string(m.active)),
-		compactPath(active.Path, m.cfg.UI.PathDisplay),
-		len(active.Entries),
-		fallback(selected.DisplayName(), "n/a"),
-	)
-
-	return lipgloss.NewStyle().
-		Width(m.width).
-		Padding(0, 1).
-		Background(m.palette.StatusBar).
-		Foreground(m.palette.Text).
-		Render(summary + "  ::  " + m.status)
-}
-
 func renderFooter(m Model) string {
 	parts := make([]string, 0, 8)
 	sep := lipgloss.NewStyle().Background(m.palette.Footer).Render("   ")
@@ -2966,6 +3481,10 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 	}
 	if m.modal.kind == modalHelp {
 		return renderHelpModal(m.modal, palette, width)
+	}
+
+	if m.modal.kind == modalSSHConnect {
+		return renderSSHConnectModal(m, palette, width)
 	}
 
 	modal := m.modal
@@ -3314,6 +3833,7 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 		spacer,
 		renderProgressPercentLine(ratio, contentWidth, palette),
 		renderProgressStatLine("Stage:", progressStageLabel(progress, job.kind), contentWidth, palette),
+		renderProgressStatLine("Target:", job.targetDir, contentWidth, palette),
 		spacer,
 		renderProgressStatLine("Files:", fmt.Sprintf("%d / %d", progress.FilesDone, progress.FilesTotal), contentWidth, palette),
 		renderProgressStatLine("Size:", fmt.Sprintf("%s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true)), contentWidth, palette),
@@ -3662,6 +4182,109 @@ func copyPlanCmd(kind fileOpKind, sourcePaths []string, targetDir string, overwr
 	}
 }
 
+// remoteCopyPlanCmd computes transfer stats for remote-involved copy/move operations.
+// For local sources it uses vfs.CopyStats; for remote sources it walks the SFTP tree.
+func (m *Model) remoteCopyPlanCmd(kind fileOpKind, sourcePaths []string, targetDir string,
+	sourceIsRemote, targetIsRemote bool, srcClient, dstClient *remote.SSHClient) tea.Cmd {
+
+	return func() tea.Msg {
+		stats := vfs.TransferStats{}
+		var err error
+
+		for _, sourcePath := range sourcePaths {
+			if !sourceIsRemote {
+				// Local source — use existing stats function
+				part, statErr := vfs.CopyStats(sourcePath)
+				if statErr != nil {
+					err = statErr
+					break
+				}
+				stats.FilesTotal += part.FilesTotal
+				stats.BytesTotal += part.BytesTotal
+			} else {
+				// Remote source — walk via SFTP
+				info, statErr := srcClient.Lstat(sourcePath)
+				if statErr != nil {
+					err = statErr
+					break
+				}
+				if !info.IsDir() {
+					stats.FilesTotal++
+					stats.BytesTotal += info.Size()
+				} else {
+					walkErr := srcClient.Walk(sourcePath, func(walkPath string, info os.FileInfo, walkErr error) error {
+						if walkErr != nil {
+							return walkErr
+						}
+						if !info.IsDir() {
+							stats.FilesTotal++
+							stats.BytesTotal += info.Size()
+						}
+						return nil
+					})
+					if walkErr != nil {
+						err = walkErr
+						break
+					}
+				}
+			}
+		}
+
+		return copyPlanMsg{
+			kind:        kind,
+			sourcePaths: append([]string(nil), sourcePaths...),
+			targetDir:   targetDir,
+			stats:       stats,
+			err:         err,
+			srcClient:   srcClient,
+			dstClient:   dstClient,
+		}
+	}
+}
+
+// remoteDeletePlanCmd computes delete stats for remote paths via SFTP.
+func (m *Model) remoteDeletePlanCmd(sources []string, client *remote.SSHClient) tea.Cmd {
+	return func() tea.Msg {
+		stats := vfs.TransferStats{}
+		var err error
+
+		for _, sourcePath := range sources {
+			info, statErr := client.Lstat(sourcePath)
+			if statErr != nil {
+				err = statErr
+				break
+			}
+			if !info.IsDir() {
+				stats.FilesTotal++
+				stats.BytesTotal += info.Size()
+			} else {
+				walkErr := client.Walk(sourcePath, func(walkPath string, info os.FileInfo, walkErr error) error {
+					if walkErr != nil {
+						return walkErr
+					}
+					if !info.IsDir() {
+						stats.FilesTotal++
+						stats.BytesTotal += info.Size()
+					}
+					return nil
+				})
+				if walkErr != nil {
+					err = walkErr
+					break
+				}
+			}
+		}
+
+		return deletePlanMsg{
+			kind:        opDelete,
+			sourcePaths: append([]string(nil), sources...),
+			stats:       stats,
+			err:         err,
+			srcClient:   client,
+		}
+	}
+}
+
 func (m *Model) enterArchive(selected vfs.Entry) error {
 	pane := m.activePane()
 	// Save current path to history before opening the archive.
@@ -3956,7 +4579,16 @@ func deletePlanPermanentCmd(sourcePaths []string) tea.Cmd {
 	}
 }
 
-func mkdirCmd(parent, name string) tea.Cmd {
+func (m *Model) mkdirCmd(parent, name string) tea.Cmd {
+	// Remote mkdir via SFTP
+	if mount, ok := m.activePane().CurrentRemote(); ok {
+		return func() tea.Msg {
+			targetPath := path.Join(parent, name)
+			err := mount.Client.MkdirAll(targetPath)
+			return opMsg{kind: opMkdir, targetPath: targetPath, err: err}
+		}
+	}
+	// Local mkdir
 	return func() tea.Msg {
 		targetPath, err := vfs.MakeDir(parent, name)
 		return opMsg{kind: opMkdir, targetPath: targetPath, err: err}
@@ -4393,4 +5025,649 @@ func (m *Model) mouseOverPathLine(x, y int) bool {
 	// The icon is at the far-right end of the preview pane content area
 	iconStartX := startX + previewWidth/2
 	return x >= iconStartX
+}
+
+// ─── SSH handlers ──────────────────────────────────────────────────────────
+
+// handleSSHToggle toggles SSH host list display in the active pane.
+func (m *Model) handleSSHToggle() (tea.Model, tea.Cmd) {
+	if m.ssh == nil {
+		m.status = "SSH init failed — check ~/.ssh/config"
+		return m, nil
+	}
+
+	pane := m.activePane()
+
+	// If already in SSH mode, exit it
+	if pane.InRemote() {
+		return m.exitSSHMode()
+	}
+	// If path is "ssh://" (host list already shown), close it too
+	if pane.Path == "ssh://" {
+		// Restore saved pre-SSH path if available
+		if m.preSSHPath != "" {
+			pane.Path = m.preSSHPath
+			m.preSSHPath = ""
+			if err := m.reloadPane(pane.ID, ""); err != nil {
+				m.status = err.Error()
+			}
+			return m, nil
+		}
+		// Fallback: try history
+		if prevPath, ok := pane.PopHistory(); ok {
+			pane.Path = prevPath
+			if err := m.reloadPane(pane.ID, ""); err != nil {
+				m.status = err.Error()
+			}
+			return m, nil
+		}
+		m.status = "SSH mode closed"
+		return m, nil
+	}
+
+	// Save current path, show SSH host list
+	m.preSSHPath = pane.Path
+	entries := buildSSHHostEntries(m.ssh.store, m.ssh.connectedHosts)
+	pane.SetEntries(entries, "")
+	pane.Path = "ssh://"
+	m.status = "SSH hosts — select a host and press Enter"
+	return m, nil
+}
+
+// exitSSHMode restores the pane to its previous directory and closes all connections.
+func (m *Model) exitSSHMode() (tea.Model, tea.Cmd) {
+	pane := m.activePane()
+
+	// Close all remote mounts
+	for {
+		mount, ok := pane.CurrentRemote()
+		if !ok {
+			break
+		}
+		if m.ssh != nil {
+			m.ssh.connectedHosts[mount.Host.Name] = false
+		}
+		pane.PopRemote()
+		mount.Client.Close()
+	}
+
+	// Close all stored active clients (connections kept alive in host list)
+	if m.ssh != nil {
+		for name, client := range m.ssh.activeClients {
+			log.Printf("[ACTION] exitSSHMode: closing stored connection for host=%s", name)
+			client.Close()
+			delete(m.ssh.activeClients, name)
+		}
+	}
+
+	// Restore original pre-SSH path
+	prevPath := m.preSSHPath
+	m.preSSHPath = ""
+	if prevPath != "" {
+		pane.Path = prevPath
+		if err := m.reloadPane(pane.ID, ""); err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		m.status = "Exited SSH mode"
+		return m, m.loadPreviewCmd()
+	}
+
+	// Fallback: try history
+	if prevPath, ok := pane.PopHistory(); ok {
+		pane.Path = prevPath
+		if err := m.reloadPane(pane.ID, ""); err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		m.status = "Exited SSH mode"
+		return m, m.loadPreviewCmd()
+	}
+
+	// Last resort: reload current directory
+	if err := m.reloadPane(pane.ID, ""); err != nil {
+		m.status = err.Error()
+		return m, nil
+	}
+	m.status = "Exited SSH mode"
+	return m, m.loadPreviewCmd()
+}
+
+// handleSSHConnectHost connects to a selected SSH host.
+func (m *Model) handleSSHConnectHost() (tea.Model, tea.Cmd) {
+	if m.ssh == nil {
+		m.status = "SSH not available"
+		return m, nil
+	}
+
+	selected, ok := m.activePane().Selected()
+	if !ok {
+		return m, nil
+	}
+
+	// Find the host config by name
+	host := m.ssh.store.FindByName(selected.RemoteHostName)
+	if host == nil {
+		m.status = fmt.Sprintf("Host %q not found in config", selected.RemoteHostName)
+		return m, nil
+	}
+
+	// Check for an existing active connection we can reuse
+	if client, ok := m.ssh.activeClients[host.Name]; ok {
+		log.Printf("[ACTION] SSHConnectHost: reusing existing connection for host=%s", host.Name)
+		delete(m.ssh.activeClients, host.Name)
+		return m, func() tea.Msg {
+			return sshConnectMsg{hostName: host.Name, client: client, err: nil}
+		}
+	}
+
+	log.Printf("[ACTION] SSHConnectHost: host=%s user=%s hostname=%s port=%d",
+		host.Name, host.User, host.HostName, host.Port)
+	m.status = fmt.Sprintf("Connecting to %s@%s...", host.User, host.HostName)
+
+	// Connect in a goroutine
+	return m, func() tea.Msg {
+		client, err := remote.Connect(*host)
+		if err != nil {
+			log.Printf("[ERROR] SSHConnectHost failed: host=%s err=%v", host.Name, err)
+			return sshConnectMsg{hostName: host.Name, err: err}
+		}
+		log.Printf("[ACTION] SSHConnectHost success: host=%s", host.Name)
+		return sshConnectMsg{hostName: host.Name, client: client, err: nil}
+	}
+}
+
+// sshConnectMsg is sent when an SSH connection attempt completes (from host list).
+type sshConnectMsg struct {
+	hostName string
+	client   *remote.SSHClient
+	err      error
+}
+
+// sshAddHostResultMsg is sent when an SSH add-host connection test completes.
+type sshAddHostResultMsg struct {
+	host remote.SSHHost
+	err  error
+}
+
+// reloadRemotePane loads directory listing from a remote SSH mount.
+func (m *Model) reloadRemotePane(id PaneID, preserve string) error {
+	pane := m.paneByID(id)
+	mount, ok := pane.CurrentRemote()
+	if !ok {
+		return fmt.Errorf("not in remote mount")
+	}
+
+	entries, err := remoteDirToEntries(pane.Path, mount.Client)
+	if err != nil {
+		log.Printf("[ERROR] reloadRemotePane: id=%s path=%s err=%v", id, pane.Path, err)
+		return err
+	}
+	pane.SetEntries(entries, strings.ToLower(preserve))
+	log.Printf("[PANEL] reloadRemotePane: id=%s path=%s entries=%d preserve=%s", id, pane.Path, len(entries), preserve)
+	return nil
+}
+
+// handleSSHOpenAddHost opens the SSH connect dialog for adding a new host.
+func (m *Model) handleSSHOpenAddHost() {
+	if m.ssh == nil {
+		m.status = "SSH not available"
+		return
+	}
+
+	log.Printf("[ACTION] SSHOpenAddHost — opening add host dialog")
+	// Reset inputs to defaults
+	m.ssh.inputs = SSHConnectDialogInputs()
+	m.ssh.inputFocus = 0
+	m.ssh.showHelp = false
+
+	m.modal = modalState{
+		kind:  modalSSHConnect,
+		title: "Add SSH host",
+		body:  "Fill in the connection details.\nTab/Shift+Tab to switch fields. F1/? for help.",
+		note:  "",
+	}
+}
+
+// handleSSHAddHostConfirm tests the connection asynchronously, then saves the host.
+// The modal stays open during the test so the user can see progress and press Esc to cancel.
+func (m *Model) handleSSHAddHostConfirm() (tea.Model, tea.Cmd) {
+	if m.ssh == nil {
+		m.modal = modalState{}
+		m.status = "SSH not available"
+		return m, nil
+	}
+
+	host := buildSSHHostFromDialog(m.ssh.inputs)
+	if host.Name == "" || host.HostName == "" || host.User == "" {
+		m.status = "Name, Hostname/IP, and User are required"
+		return m, nil
+	}
+
+	log.Printf("[ACTION] SSHAddHostConfirm: testing connection to %s@%s", host.User, host.HostName)
+
+	// Mark connection test as in progress so the modal shows "Connecting..." state
+	m.ssh.testingConn = true
+	m.busy = true
+	m.status = fmt.Sprintf("Testing connection to %s@%s...", host.User, host.HostName)
+
+	// Use a context for cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	m.ssh.cancelTest = cancel
+
+	return m, func() tea.Msg {
+		defer cancel()
+
+		// Run connection in a separate goroutine, listen for cancellation
+		type connResult struct {
+			client *remote.SSHClient
+			err    error
+		}
+		resultCh := make(chan connResult, 1)
+
+		go func() {
+			client, err := remote.Connect(host)
+			resultCh <- connResult{client: client, err: err}
+		}()
+
+		select {
+		case <-ctx.Done():
+			// Cancelled — wait for connect to finish (if still running) and discard
+			select {
+			case res := <-resultCh:
+				if res.client != nil {
+					res.client.Close()
+				}
+			default:
+			}
+			return sshAddHostResultMsg{host: host, err: fmt.Errorf("cancelled")}
+		case res := <-resultCh:
+			if res.err != nil {
+				return sshAddHostResultMsg{host: host, err: res.err}
+			}
+			res.client.Close()
+			return sshAddHostResultMsg{host: host, err: nil}
+		}
+	}
+}
+
+// handleSSHHostDelete removes a user-added SSH host from the store.
+// Hosts from ~/.ssh/config are read-only and cannot be deleted here.
+// Shows a confirmation dialog before removing the host.
+func (m *Model) handleSSHHostDelete() (tea.Model, tea.Cmd) {
+	if m.ssh == nil {
+		m.status = "SSH not available"
+		return m, nil
+	}
+
+	selected, ok := m.activePane().Selected()
+	if !ok {
+		m.status = "Nothing to delete"
+		return m, nil
+	}
+
+	hostName := selected.RemoteHostName
+	if hostName == "" {
+		// Fallback: extract from path "ssh://hostname"
+		hostName = strings.TrimPrefix(selected.Path, "ssh://")
+	}
+
+	// Find the host to check if it's from SSH config
+	host := m.ssh.store.FindByName(hostName)
+	if host == nil {
+		m.status = fmt.Sprintf("Host %q not found", hostName)
+		return m, nil
+	}
+
+	if host.FromSSHConfig {
+		log.Printf("[SKIP] SSH host delete: %q is from ~/.ssh/config (read-only)", hostName)
+		m.status = fmt.Sprintf("Host %q is from SSH config and cannot be deleted", hostName)
+		return m, nil
+	}
+
+	// Build host details for the confirmation dialog
+	hostAddr := host.HostName
+	if host.Port != "" && host.Port != "22" {
+		hostAddr = fmt.Sprintf("%s:%s", host.HostName, host.Port)
+	}
+	hostUser := host.User
+	if hostUser == "" {
+		hostUser = "(default)"
+	}
+
+	title := fmt.Sprintf("Delete host %q?", hostName)
+	body := fmt.Sprintf("Name:     %s\nAddress:  %s\nUser:     %s\n\nThis will remove the host from saved list.", hostName, hostAddr, hostUser)
+
+	m.openConfirmModal(
+		title,
+		body,
+		"confirm-actions",
+		pendingOperation{
+			kind:        opDeleteHost,
+			sourcePaths: []string{hostName},
+		},
+	)
+	return m, nil
+}
+
+// executeSSHHostDelete performs the actual SSH host removal after confirmation.
+func (m *Model) executeSSHHostDelete(hostName string) (tea.Model, tea.Cmd) {
+	if m.ssh == nil {
+		m.status = "SSH not available"
+		return m, nil
+	}
+
+	log.Printf("[ACTION] SSH host delete: removing host %q", hostName)
+
+	// Close and clean up active client if any
+	if client, ok := m.ssh.activeClients[hostName]; ok {
+		client.Close()
+		delete(m.ssh.activeClients, hostName)
+	}
+
+	if err := m.ssh.store.RemoveHost(hostName); err != nil {
+		m.status = fmt.Sprintf("Failed to delete host: %v", err)
+		return m, nil
+	}
+
+	m.status = fmt.Sprintf("Host %q deleted", hostName)
+
+	// Remove from connected hosts tracking
+	delete(m.ssh.connectedHosts, hostName)
+
+	// Refresh the SSH host list
+	entries := buildSSHHostEntries(m.ssh.store, m.ssh.connectedHosts)
+	m.activePane().SetEntries(entries, "")
+	return m, nil
+}
+
+// enterRemoteDir navigates into a remote directory on an SSH mount.
+func (m *Model) enterRemoteDir(entry vfs.Entry) (tea.Model, tea.Cmd) {
+	m.hover = hoverState{}
+	pane := m.activePane()
+
+	if !entry.IsDir {
+		return m, nil
+	}
+
+	pane.PushHistory(pane.Path)
+	log.Printf("[NAV] enterRemoteDir — pane=%s from=%s to=%s", pane.ID, pane.Path, entry.Path)
+	pane.Path = entry.Path
+	if err := m.reloadRemotePane(pane.ID, entry.Name); err != nil {
+		m.status = err.Error()
+		return m, nil
+	}
+	m.status = fmt.Sprintf("Entered %s", pane.Path)
+	return m, m.loadPreviewCmd()
+}
+
+// remoteDeleteCmd deletes files/directories on a remote host via SFTP.
+func (m *Model) remoteDeleteCmd(sources []string, client *remote.SSHClient) tea.Cmd {
+	log.Printf("[ACTION] remoteDeleteCmd: sources=%v", sources)
+	return func() tea.Msg {
+		for _, sourcePath := range sources {
+			log.Printf("[JOB] remoteDelete: removing path=%s", sourcePath)
+			if err := client.RemoveRecursive(sourcePath); err != nil {
+				log.Printf("[ERROR] remoteDelete failed: path=%s err=%v", sourcePath, err)
+				return opMsg{kind: opDelete, sourcePath: sourcePath, err: err}
+			}
+		}
+		log.Printf("[DONE] remoteDelete: completed %d sources", len(sources))
+		return opMsg{kind: opDelete}
+	}
+}
+
+// remoteTransferCmd copies or moves files between local and remote filesystems.
+// kind: opCopy or opMove
+// sources: paths on the source side
+// targetDir: path on the target side
+// sourceIsRemote: true if sources are remote paths
+// targetIsRemote: true if targetDir is a remote path
+// srcClient: SFTP client for reading (if source is remote)
+// dstClient: SFTP client for writing (if target is remote)
+// startRemoteCopyJob copies files between local and remote filesystems with
+// progress reporting. Runs the transfer in a goroutine so the UI stays
+// responsive, following the same pattern as startCopyJob.
+func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir string,
+	sourceIsRemote, targetIsRemote bool, srcClient, dstClient *remote.SSHClient,
+	stats vfs.TransferStats) tea.Cmd {
+
+	m.nextCopyJob++
+	jobID := m.nextCopyJob
+	_, cancel := context.WithCancel(context.Background())
+
+	m.copyJob = &copyJobState{
+		id:          jobID,
+		kind:        kind,
+		sourcePaths: append([]string(nil), sources...),
+		targetDir:   targetDir,
+		progress: vfs.CopyProgress{
+			FilesDone:   0,
+			FilesTotal:  stats.FilesTotal,
+			BytesDone:   0,
+			BytesTotal:  stats.BytesTotal,
+			CurrentPath: sources[0],
+		},
+		cancel:    cancel,
+		startedAt: time.Now(),
+	}
+	m.modal = modalState{kind: modalCopyProgress}
+	m.status = strings.Title(operationVerb(kind)) + " started"
+
+	log.Printf("[JOB] startRemoteCopyJob: id=%d kind=%d sources=%d targetDir=%s srcRemote=%v dstRemote=%v stats={files=%d bytes=%d}",
+		jobID, kind, len(sources), targetDir, sourceIsRemote, targetIsRemote, stats.FilesTotal, stats.BytesTotal)
+
+	return tea.Batch(
+		func() tea.Msg {
+			go func() {
+				doneFiles := 0
+				var doneBytes int64
+
+				for _, sourcePath := range sources {
+					baseName := filepath.Base(sourcePath)
+					targetPath := filepath.Join(targetDir, baseName)
+					log.Printf("[JOB] remoteCopy — starting: job=%d source=%s target=%s", jobID, sourcePath, targetPath)
+
+					var info os.FileInfo
+					var err error
+
+					// Get file info and perform copy depending on direction.
+					switch {
+					case !sourceIsRemote && targetIsRemote:
+						// Local → Remote
+						info, err = os.Stat(sourcePath)
+						if err == nil {
+							if info.IsDir() {
+								log.Printf("[JOB] remoteCopy — local→remote dir: job=%d source=%s target=%s", jobID, sourcePath, targetPath)
+								err = dstClient.CopyDirToRemote(sourcePath, targetPath)
+							} else {
+								log.Printf("[JOB] remoteCopy — local→remote file: job=%d source=%s target=%s size=%d", jobID, sourcePath, targetPath, info.Size())
+								err = dstClient.CopyFileToRemote(sourcePath, targetPath)
+							}
+						}
+
+					case sourceIsRemote && !targetIsRemote:
+						// Remote → Local
+						info, err = srcClient.Lstat(sourcePath)
+						if err == nil {
+							if info.IsDir() {
+								log.Printf("[JOB] remoteCopy — remote→local dir: job=%d source=%s target=%s", jobID, sourcePath, targetPath)
+								err = srcClient.CopyDirFromRemote(sourcePath, targetPath)
+							} else {
+								log.Printf("[JOB] remoteCopy — remote→local file: job=%d source=%s target=%s size=%d", jobID, sourcePath, targetPath, info.Size())
+								err = srcClient.CopyFileFromRemote(sourcePath, targetPath)
+							}
+						}
+
+					case sourceIsRemote && targetIsRemote:
+						// Remote → Remote (stream between two SFTP connections)
+						info, err = srcClient.Lstat(sourcePath)
+						if err == nil {
+							if info.IsDir() {
+								log.Printf("[JOB] remoteCopy — remote→remote dir: job=%d source=%s target=%s", jobID, sourcePath, targetPath)
+								err = remote.CopyDirBetweenRemotes(srcClient, dstClient, sourcePath, targetPath)
+							} else {
+								log.Printf("[JOB] remoteCopy — remote→remote file: job=%d source=%s target=%s size=%d", jobID, sourcePath, targetPath, info.Size())
+								err = remote.CopyFileBetweenRemotes(srcClient, dstClient, sourcePath, targetPath)
+							}
+						}
+					}
+
+					if err != nil {
+						log.Printf("[ERROR] remoteCopy — transfer failed: job=%d source=%s target=%s err=%v", jobID, sourcePath, targetPath, err)
+						m.copyProgress <- copyDoneMsg{
+							jobID: jobID, kind: kind,
+							sourcePaths: sources, targetDir: targetDir,
+							err: err,
+						}
+						return
+					}
+
+					// For move operations, delete the source after copying
+					if kind == opMove {
+						log.Printf("[JOB] remoteCopy — move, removing source: job=%d source=%s", jobID, sourcePath)
+						if !sourceIsRemote {
+							if err := os.RemoveAll(sourcePath); err != nil {
+								log.Printf("[ERROR] remoteCopy — remove local source failed: job=%d source=%s err=%v", jobID, sourcePath, err)
+								m.copyProgress <- copyDoneMsg{
+									jobID: jobID, kind: kind,
+									sourcePaths: sources, targetDir: targetDir,
+									err: err,
+								}
+								return
+							}
+						} else {
+							if err := srcClient.RemoveRecursive(sourcePath); err != nil {
+								log.Printf("[ERROR] remoteCopy — remove remote source failed: job=%d source=%s err=%v", jobID, sourcePath, err)
+								m.copyProgress <- copyDoneMsg{
+									jobID: jobID, kind: kind,
+									sourcePaths: sources, targetDir: targetDir,
+									err: err,
+								}
+								return
+							}
+						}
+					}
+
+					doneFiles++
+					if info != nil && !info.IsDir() {
+						doneBytes += info.Size()
+					}
+
+					// Send file-level progress update so the UI stays responsive
+					m.copyProgress <- copyProgressMsg{
+						jobID: jobID,
+						progress: vfs.CopyProgress{
+							FilesDone:   doneFiles,
+							FilesTotal:  stats.FilesTotal,
+							BytesDone:   doneBytes,
+							BytesTotal:  stats.BytesTotal,
+							CurrentPath: sourcePath,
+							Stage:       "Transferring data",
+						},
+					}
+				}
+
+				firstItem := filepath.Join(targetDir, filepath.Base(sources[0]))
+				log.Printf("[DONE] remoteCopy — job=%d completed: kind=%d files=%d bytes=%d firstItem=%s",
+					jobID, kind, doneFiles, doneBytes, firstItem)
+				m.copyProgress <- copyDoneMsg{
+					jobID:       jobID,
+					kind:        kind,
+					sourcePaths: sources,
+					targetDir:   targetDir,
+					targetPath:  firstItem,
+				}
+			}()
+			return nil
+		},
+		waitCopyProgressCmd(m.copyProgress),
+	)
+}
+
+// renderSSHConnectModal renders the SSH connect/add-host dialog.
+func renderSSHConnectModal(m Model, palette theme.Palette, width int) string {
+	if m.ssh == nil {
+		return ""
+	}
+
+	outerWidth := max(width, 8)
+	contentWidth := max(outerWidth-6, 1)
+	titleStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Bold(true).Foreground(palette.Accent)
+	noteStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
+	spacer := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(" ")
+
+	labelStyle := lipgloss.NewStyle().
+		Width(contentWidth).
+		Background(palette.Panel).
+		Foreground(palette.Info).
+		Bold(true)
+
+	inputFieldStyle := lipgloss.NewStyle().
+		Width(contentWidth).
+		Background(palette.Panel)
+
+	// Connecting indicator style
+	connectingStyle := lipgloss.NewStyle().
+		Width(contentWidth).
+		Background(palette.Panel).
+		Foreground(palette.Warning).
+		Bold(true)
+
+	box := lipgloss.NewStyle().
+		Width(contentWidth).
+		Padding(1, 2).
+		Background(palette.Panel).
+		Foreground(palette.Text).
+		BorderStyle(lipgloss.DoubleBorder()).
+		BorderForeground(palette.BorderActive).
+		BorderBackground(palette.Panel)
+
+	lines := []string{titleStyle.Render("Add SSH host"), spacer}
+
+	// Show connecting state when test is in progress
+	if m.ssh.testingConn {
+		lines = append(lines, connectingStyle.Render("⏳ Testing connection..."))
+		lines = append(lines, spacer)
+		// Show the host details that were entered
+		for i, input := range m.ssh.inputs {
+			label := sshDialogLabel(i)
+			val := input.Value()
+			displayVal := val
+			if i == 4 && val != "" {
+				displayVal = "••••••••"
+			}
+			row := labelStyle.Render(label) + inputFieldStyle.Render(displayVal)
+			lines = append(lines, row)
+		}
+		lines = append(lines, spacer)
+		if hl, ok := renderModalHintTokens("Esc to cancel", contentWidth, palette, palette.Muted); ok {
+			lines = append(lines, hl)
+		}
+	} else if m.ssh.showHelp {
+		helpStyle := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Foreground(palette.Muted)
+		for _, raw := range strings.Split(formatSSHConnectHelp(), "\n") {
+			lines = append(lines, helpStyle.Render(raw))
+		}
+		lines = append(lines, spacer, noteStyle.Render("Press F1/? to close help"))
+	} else {
+		// Render input fields with labels
+		for i, input := range m.ssh.inputs {
+			label := sshDialogLabel(i)
+			lines = append(lines, labelStyle.Render(label))
+			lines = append(lines, inputFieldStyle.Render(input.View()))
+			if i < len(m.ssh.inputs)-1 {
+				lines = append(lines, spacer)
+			}
+		}
+		lines = append(lines, spacer)
+		// Use hint token renderer to highlight Enter, Esc, F1
+		if hl, ok := renderModalHintTokens("Enter to confirm · Esc to cancel · F1/? for help", contentWidth, palette, palette.Muted); ok {
+			lines = append(lines, hl)
+		} else {
+			lines = append(lines, noteStyle.Render("Enter to confirm · Esc to cancel · F1/? for help"))
+		}
+	}
+
+	return box.Render(strings.Join(lines, "\n"))
 }
