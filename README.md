@@ -36,13 +36,13 @@ go build -o vcom ./cmd/vcom
 Run directly from the flake:
 
 ```bash
-nix run github:vrubelroman/vcom?ref=v0.2.1
+nix run github:vrubelroman/vcom?ref=v0.2.2
 ```
 
 Install into user profile:
 
 ```bash
-nix profile add github:vrubelroman/vcom?ref=v0.2.1
+nix profile add github:vrubelroman/vcom?ref=v0.2.2
 ```
 
 The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works in non-`kitty` terminals out of the box.
@@ -52,8 +52,8 @@ The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works
 Download and install the latest release:
 
 ```bash
-curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.1/vcom_0.2.1_amd64.deb -o /tmp/vcom_0.2.1_amd64.deb
-sudo apt install /tmp/vcom_0.2.0_amd64.deb
+curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.2/vcom_0.2.2_amd64.deb -o /tmp/vcom_0.2.2_amd64.deb
+sudo apt install /tmp/vcom_0.2.2_amd64.deb
 ```
 
 The Debian package declares `ueberzug` (or `ueberzugpp` where available) as a dependency for image preview outside `kitty`.
@@ -183,7 +183,7 @@ Built-in themes (use `T` to cycle or set `ui.theme` in config):
 
 ## Releases
 
-Pushing a tag like `v0.2.1` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
+Pushing a tag like `v0.2.2` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
 
 - runs tests
 - vendors Go modules
@@ -193,9 +193,9 @@ Pushing a tag like `v0.2.1` triggers GitHub Actions release workflow (`.github/w
 
 Release artifacts:
 
-- `vcom-v0.2.1-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_0.2.1_amd64.deb`
-- `vcom-v0.2.1-checksums.txt`
+- `vcom-v0.2.2-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_0.2.2_amd64.deb`
+- `vcom-v0.2.2-checksums.txt`
 
 ## Notes
 

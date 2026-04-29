@@ -85,7 +85,7 @@ func DefaultKeyMap() KeyMap {
 }
 
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Help, k.Rename, k.View, k.Archive, k.Copy, k.Move, k.Mkdir, k.Delete, k.Info, k.Quit, k.SSH}
+	return []key.Binding{k.Help, k.Rename, k.View, k.Archive, k.Copy, k.Move, k.Mkdir, k.Delete, k.Info, k.Quit, k.PermanentDelete, k.SSH}
 }
 
 func (k KeyMap) FullHelp() [][]key.Binding {
