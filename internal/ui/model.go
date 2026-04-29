@@ -454,10 +454,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Printf("[ACTION] opMsg: Delete done — moved %s to trash", msg.sourcePath)
 			m.status = "Moved to trash"
 			m.activePane().ClearMarks()
+			// Move cursor to the item above if not at the top.
+			// If already at the top (cursor == 0), stay at position 0 —
+			// the next entry shifts into the deleted item's place.
+			active := m.activePane()
+			if active.Cursor > 0 {
+				active.Cursor--
+			}
+			if m.active == PaneLeft {
+				leftSelection = ""
+			} else {
+				rightSelection = ""
+			}
 		case opPermanentDelete:
 			log.Printf("[ACTION] opMsg: PermanentDelete done — sourcePath=%s", msg.sourcePath)
 			m.status = "Permanently deleted"
 			m.activePane().ClearMarks()
+			// Move cursor to the item above if not at the top.
+			// If already at the top (cursor == 0), stay at position 0 —
+			// the next entry shifts into the deleted item's place.
+			active := m.activePane()
+			if active.Cursor > 0 {
+				active.Cursor--
+			}
+			if m.active == PaneLeft {
+				leftSelection = ""
+			} else {
+				rightSelection = ""
+			}
 		case opMkdir:
 			log.Printf("[ACTION] opMsg: Mkdir done — targetPath=%s", msg.targetPath)
 			m.status = fmt.Sprintf("Created %s", msg.targetPath)
@@ -3232,8 +3256,8 @@ func renderPreviewPane(preview vfs.Preview, viewportModel *viewport.Model, cfg c
 	// but non-interactive (no cursor, no selection).
 	if preview.Kind == vfs.PreviewKindDirectory && len(preview.Entries) > 0 {
 		dirPane := BrowserPane{Entries: preview.Entries}
-		headerRow := renderColumnsHeader(cfg, innerWidth, palette, palette.Panel, useNerdfont)
-		rows := renderPaneRows(dirPane, cfg, palette, innerWidth, contentHeight, false, -1, palette.Panel, useNerdfont)
+		headerRow := renderColumnsHeader(cfg, innerWidth, palette, palette.Panel, useNerdfont, false)
+		rows := renderPaneRows(dirPane, cfg, palette, innerWidth, contentHeight, false, -1, palette.Panel, useNerdfont, false)
 		parts = append(parts, lipgloss.JoinVertical(lipgloss.Left, headerRow, rows))
 	} else {
 		parts = append(parts, renderPreviewContent(viewportModel, palette, innerWidth, contentHeight))

@@ -379,9 +379,10 @@ func renderPane(
 	header := lipgloss.NewStyle().
 		Render(renderPaneHeader(pane, cfg, palette, innerWidth, active, headerBg))
 
+	isSSHHostList := pane.Path == "ssh://"
 	rowsHeight := max(innerHeight-2, 1)
-	headerRow := renderColumnsHeader(cfg, innerWidth, palette, bodyBg, useNerdIcons)
-	rows := renderPaneRows(pane, cfg, palette, innerWidth, rowsHeight, active, hoverIndex, bodyBg, useNerdIcons)
+	headerRow := renderColumnsHeader(cfg, innerWidth, palette, bodyBg, useNerdIcons, isSSHHostList)
+	rows := renderPaneRows(pane, cfg, palette, innerWidth, rowsHeight, active, hoverIndex, bodyBg, useNerdIcons, isSSHHostList)
 	content := lipgloss.JoinVertical(lipgloss.Left, header, headerRow, rows)
 	return box.Render(content)
 }
@@ -403,8 +404,8 @@ func renderPaneHeader(pane BrowserPane, cfg config.Config, palette theme.Palette
 		Render(pathStyle.Render(truncateMiddle(compactPath(pane.DisplayPath(), cfg.UI.PathDisplay), pathWidth)))
 }
 
-func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, background lipgloss.Color, useNerdIcons bool) string {
-	columns := buildColumns(cfg, width, useNerdIcons)
+func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, background lipgloss.Color, useNerdIcons bool, hideExtraCols bool) string {
+	columns := buildColumns(cfg, width, useNerdIcons, hideExtraCols)
 	parts := make([]string, 0, len(columns))
 	for idx, column := range columns {
 		style := lipgloss.NewStyle().
@@ -426,7 +427,7 @@ func renderColumnsHeader(cfg config.Config, width int, palette theme.Palette, ba
 		Render(strings.Join(parts, ""))
 }
 
-func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, width int, height int, active bool, hoverIndex int, background lipgloss.Color, useNerdIcons bool) string {
+func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, width int, height int, active bool, hoverIndex int, background lipgloss.Color, useNerdIcons bool, hideExtraCols bool) string {
 	if len(pane.Entries) == 0 {
 		return lipgloss.NewStyle().
 			Width(width).
@@ -446,7 +447,7 @@ func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, 
 		entry := pane.Entries[idx]
 		isSelected := idx == pane.Cursor && active
 		marked := !entry.IsParent && pane.IsMarked(entry.Path)
-		row := renderEntryRow(entry, cfg, width, isSelected, marked, idx == hoverIndex, active, palette, background, useNerdIcons)
+		row := renderEntryRow(entry, cfg, width, isSelected, marked, idx == hoverIndex, active, palette, background, useNerdIcons, hideExtraCols)
 		lines = append(lines, row)
 	}
 	for len(lines) < visibleHeight {
@@ -459,8 +460,8 @@ func renderPaneRows(pane BrowserPane, cfg config.Config, palette theme.Palette, 
 		Render(strings.Join(lines, "\n"))
 }
 
-func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool, marked bool, hovered bool, active bool, palette theme.Palette, baseBackground lipgloss.Color, useNerdIcons bool) string {
-	columns := buildColumns(cfg, width, useNerdIcons)
+func renderEntryRow(entry vfs.Entry, cfg config.Config, width int, selected bool, marked bool, hovered bool, active bool, palette theme.Palette, baseBackground lipgloss.Color, useNerdIcons bool, hideExtraCols bool) string {
+	columns := buildColumns(cfg, width, useNerdIcons, hideExtraCols)
 	rowBackground := baseBackground
 	switch {
 	case marked:
@@ -512,7 +513,7 @@ type columnSpec struct {
 	Value      func(entry vfs.Entry, human bool) string
 }
 
-func buildColumns(cfg config.Config, totalWidth int, useNerdIcons bool) []columnSpec {
+func buildColumns(cfg config.Config, totalWidth int, useNerdIcons bool, hideExtraCols bool) []columnSpec {
 	fixed := []columnSpec{}
 
 	if cfg.Browser.Columns.Permissions {
@@ -540,7 +541,7 @@ func buildColumns(cfg config.Config, totalWidth int, useNerdIcons bool) []column
 			},
 		})
 	}
-	if cfg.Browser.Columns.Size {
+	if cfg.Browser.Columns.Size && !hideExtraCols {
 		fixed = append(fixed, columnSpec{
 			Key:        "size",
 			Title:      "Size",
@@ -578,13 +579,16 @@ func buildColumns(cfg config.Config, totalWidth int, useNerdIcons bool) []column
 			},
 		})
 	}
-	if cfg.Browser.Columns.Modified {
+	if cfg.Browser.Columns.Modified && !hideExtraCols {
 		fixed = append(fixed, columnSpec{
 			Key:      "modified",
 			Title:    "Modified",
 			Width:    11,
 			MinWidth: 8,
 			Value: func(entry vfs.Entry, _ bool) string {
+				if entry.IsParent {
+					return ""
+				}
 				return vfs.CompactTime(entry.ModifiedAt)
 			},
 		})

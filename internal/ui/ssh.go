@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
@@ -27,11 +28,32 @@ func buildSSHHostEntries(store *remote.HostStore, connectedHosts map[string]bool
 	hosts := store.AllHosts()
 	entries := make([]vfs.Entry, 0, len(hosts)+1)
 
+	// Find the longest host name so we can pad them all to the same width,
+	// making the (user@host) suffix align vertically across entries.
+	maxNameLen := 0
+	for _, h := range hosts {
+		if l := len(h.Name); l > maxNameLen {
+			maxNameLen = l
+		}
+	}
+
 	for _, h := range hosts {
 		isConnected := connectedHosts != nil && connectedHosts[h.Name]
 
+		addr := h.HostName
+		if h.Port != "" && h.Port != "22" {
+			addr = fmt.Sprintf("%s:%s", addr, h.Port)
+		}
+		suffix := ""
+		if h.User != "" {
+			suffix = fmt.Sprintf(" (%s@%s)", h.User, addr)
+		} else {
+			suffix = fmt.Sprintf(" (%s)", addr)
+		}
+		paddedName := h.Name + strings.Repeat(" ", maxNameLen-len(h.Name))
+
 		entries = append(entries, vfs.Entry{
-			Name:           h.DisplayName(),
+			Name:           paddedName + suffix,
 			Path:           "ssh://" + h.Name,
 			IsDir:          true,
 			IsRemote:       true,

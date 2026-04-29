@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -21,6 +22,9 @@ type SSHClient struct {
 
 	sshConn *ssh.Client
 	sftpCli *sftp.Client
+
+	keepaliveStop chan struct{}
+	keepaliveWg   sync.WaitGroup
 }
 
 // Connect establishes an SSH connection to the remote host and opens an SFTP session.
@@ -55,11 +59,34 @@ func Connect(host SSHHost) (*SSHClient, error) {
 		return nil, fmt.Errorf("sftp client: %w", err)
 	}
 
-	return &SSHClient{
-		Host:    host,
-		sshConn: sshConn,
-		sftpCli: sftpCli,
-	}, nil
+	client := &SSHClient{
+		Host:          host,
+		sshConn:       sshConn,
+		sftpCli:       sftpCli,
+		keepaliveStop: make(chan struct{}),
+	}
+
+	// Start keepalive goroutine — sends keepalive@openssh.com every 30s
+	// to prevent the SSH server from dropping the connection during inactivity.
+	client.keepaliveWg.Add(1)
+	go func() {
+		defer client.keepaliveWg.Done()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_, _, err := sshConn.SendRequest("keepalive@openssh.com", true, nil)
+				if err != nil {
+					return
+				}
+			case <-client.keepaliveStop:
+				return
+			}
+		}
+	}()
+
+	return client, nil
 }
 
 // authMethodsForHost returns the appropriate SSH auth methods for the given host.
@@ -248,6 +275,17 @@ func (c *SSHClient) Rename(oldPath, newPath string) error {
 
 // Close closes the SFTP session and SSH connection.
 func (c *SSHClient) Close() error {
+	// Stop the keepalive goroutine first
+	if c.keepaliveStop != nil {
+		select {
+		case <-c.keepaliveStop:
+			// already closed
+		default:
+			close(c.keepaliveStop)
+		}
+		c.keepaliveWg.Wait()
+	}
+
 	var firstErr error
 
 	if c.sftpCli != nil {
