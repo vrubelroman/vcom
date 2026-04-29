@@ -1257,6 +1257,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleDelete()
 		case key.Matches(msg, m.keys.Unpack):
 			return m.handleUnpack()
+		case key.Matches(msg, m.keys.Mirror):
+			return m.handleMirrorPane()
 		case key.Matches(msg, m.keys.SSH):
 			log.Printf("[KEY] SSH toggle — active=%s path=%s", m.active, activePane.Path)
 			return m.handleSSHToggle()
@@ -1881,11 +1883,15 @@ func (m *Model) enterSelected() error {
 		m.status = "File is shown in the middle pane. Use F3 for pager or F4 for editor."
 		return nil
 	}
+	// Save cursor position for the current directory before navigating away.
+	pane.SaveCursor(pane.Path, selected.Name)
 	// Save current directory to history before navigating.
 	pane.PushHistory(pane.Path)
 	log.Printf("[NAV] enterSelected — pane=%s from=%s to=%s", pane.ID, pane.Path, selected.Path)
 	pane.Path = selected.Path
-	if err := m.reloadPane(pane.ID, selected.Name); err != nil {
+	// Restore cursor position if we've visited this directory before in this session.
+	preserve := pane.LoadCursor(pane.Path)
+	if err := m.reloadPane(pane.ID, preserve); err != nil {
 		return err
 	}
 	m.status = fmt.Sprintf("Entered %s", pane.Path)
@@ -1998,6 +2004,9 @@ func (m *Model) goParent() error {
 			return nil
 		}
 		// Inside remote subdirectory — go up one level
+		if selected, ok := pane.Selected(); ok && !selected.IsParent {
+			pane.SaveCursor(pane.Path, selected.Name)
+		}
 		pane.PushHistory(pane.Path)
 		parent := path.Dir(current)
 		if parent == "." {
@@ -2037,6 +2046,10 @@ func (m *Model) goParent() error {
 		return nil
 	}
 
+	// Save cursor position before leaving this directory.
+	if selected, ok := pane.Selected(); ok && !selected.IsParent {
+		pane.SaveCursor(pane.Path, selected.Name)
+	}
 	parent := filepath.Dir(pane.Path)
 	if parent == pane.Path {
 		return nil
@@ -2060,13 +2073,19 @@ func (m *Model) historyBack() (tea.Model, tea.Cmd) {
 		m.status = "No directory history"
 		return m, nil
 	}
+	// Save cursor position for the current directory before navigating away.
+	if selected, ok := pane.Selected(); ok && !selected.IsParent {
+		pane.SaveCursor(pane.Path, selected.Name)
+	}
 	// Save current path to forward-stack so forward navigation can restore it.
 	pane.PushFuture(pane.Path)
 	log.Printf("[NAV] historyBack — pane=%s cur=%s prev=%s", pane.ID, pane.Path, prevPath)
 	pane.Path = prevPath
 	pane.Cursor = 0
 	pane.Offset = 0
-	if err := m.reloadPane(pane.ID, ""); err != nil {
+	// Restore cursor position if we've visited this directory before in this session.
+	preserve := pane.LoadCursor(pane.Path)
+	if err := m.reloadPane(pane.ID, preserve); err != nil {
 		m.status = err.Error()
 		return m, nil
 	}
@@ -2082,13 +2101,19 @@ func (m *Model) historyForward() (tea.Model, tea.Cmd) {
 		m.status = "No forward history"
 		return m, nil
 	}
+	// Save cursor position for the current directory before navigating away.
+	if selected, ok := pane.Selected(); ok && !selected.IsParent {
+		pane.SaveCursor(pane.Path, selected.Name)
+	}
 	// Save current path to back-stack so back navigation can restore it.
 	pane.PushHistory(pane.Path)
 	log.Printf("[NAV] historyForward — pane=%s cur=%s next=%s", pane.ID, pane.Path, nextPath)
 	pane.Path = nextPath
 	pane.Cursor = 0
 	pane.Offset = 0
-	if err := m.reloadPane(pane.ID, ""); err != nil {
+	// Restore cursor position if we've visited this directory before in this session.
+	preserve := pane.LoadCursor(pane.Path)
+	if err := m.reloadPane(pane.ID, preserve); err != nil {
 		m.status = err.Error()
 		return m, nil
 	}
@@ -2373,6 +2398,51 @@ func (m *Model) handleUnpack() (tea.Model, tea.Cmd) {
 	}
 	m.openConfirmModal(title, body, note, pending)
 	return m, nil
+}
+
+func (m *Model) handleMirrorPane() (tea.Model, tea.Cmd) {
+	active := m.activePane()
+	passive := m.passivePane()
+
+	// Determine the target path from the active pane
+	targetPath := active.Path
+	log.Printf("[ACTION] MirrorPane — active=%s path=%s inRemote=%v inArchive=%v", m.active, targetPath, active.InRemote(), active.InArchive())
+
+	// If active is in a remote mount, clone the remote stack to passive
+	if mount, ok := active.CurrentRemote(); ok {
+		// If passive already has a remote connection, clean it up first
+		if existingMount, exists := passive.CurrentRemote(); exists {
+			existingMount.Client.Close()
+			passive.PopRemote()
+		}
+		// Clone the mount — don't clone the client, open a new connection
+		// For simplicity, just set the path; the mount will reconnect on reload
+		passive.ClearRemotes()
+		passive.Remote = append(passive.Remote, mount)
+		passive.Path = active.Path
+		if err := m.reloadRemotePane(passive.ID, ""); err != nil {
+			m.status = fmt.Sprintf("Mirror failed: %v", err)
+			return m, nil
+		}
+	} else if active.InArchive() {
+		// Archive mounts: set path directly, archive data stays on active pane
+		passive.Path = targetPath
+		if err := m.reloadPane(passive.ID, ""); err != nil {
+			m.status = fmt.Sprintf("Mirror failed: %v", err)
+			return m, nil
+		}
+	} else {
+		// Local directory — simple path copy
+		passive.ClearRemotes()
+		passive.Path = targetPath
+		if err := m.reloadPane(passive.ID, ""); err != nil {
+			m.status = fmt.Sprintf("Mirror failed: %v", err)
+			return m, nil
+		}
+	}
+
+	m.status = fmt.Sprintf("Mirrored: %s", targetPath)
+	return m, m.loadPreviewCmd()
 }
 
 func (m *Model) handleView() (tea.Model, tea.Cmd) {
@@ -2925,26 +2995,19 @@ func (m *Model) openHelpModal() {
 		"  w / b          move caret by word",
 		"  Ctrl+t         mouse selection mode in text preview pane",
 		"  Space          calculate selected directory size",
-		"  s              cycle sort mode",
+		"  p              mirror current path to opposite pane",
+		"  s              toggle SSH host list",
+		"  g              cycle sort mode",
 		"  .              toggle hidden files",
 		"  t              cycle theme",
 		"",
 		"Dialogs and Transfers",
-		"  F8 / x         delete (trash or permanent, d to toggle)",
-		"  F11            extract archive to opposite pane",
+		"  x              delete selected entry",
+		"  a              archive selected entry",
 		"  r              rename selected entry",
+		"  n              create new directory",
 		"  Enter / y      confirm action",
 		"  Esc / n        cancel action",
-		"  b              run copy/move in background (progress dialog)",
-		"  c              cancel active copy/move transfer",
-		"",
-		"Mouse",
-		"  Left click     select entry and activate pane",
-		"  Double click   open selected entry",
-		"  Right click    toggle preview/info mode for clicked entry",
-		"  Wheel          scroll list or preview area",
-		"",
-		"F1–F10 actions are shown in the footer.",
 	}
 
 	m.modal = modalState{
@@ -5731,10 +5794,18 @@ func (m *Model) enterRemoteDir(entry vfs.Entry) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Save cursor position for the current directory before navigating away.
+	pane.SaveCursor(pane.Path, entry.Name)
+
 	pane.PushHistory(pane.Path)
 	log.Printf("[NAV] enterRemoteDir — pane=%s from=%s to=%s", pane.ID, pane.Path, entry.Path)
 	pane.Path = entry.Path
-	if err := m.reloadRemotePane(pane.ID, entry.Name); err != nil {
+	// Restore cursor position if we've visited this directory before in this session.
+	preserve := pane.LoadCursor(pane.Path)
+	if preserve == "" {
+		preserve = entry.Name
+	}
+	if err := m.reloadRemotePane(pane.ID, preserve); err != nil {
 		m.status = err.Error()
 		return m, nil
 	}

@@ -15,6 +15,7 @@ type KeyMap struct {
 	CycleTheme     key.Binding
 	CycleSort      key.Binding
 	SSH            key.Binding
+	Mirror         key.Binding
 	Up             key.Binding
 	Down           key.Binding
 	SelectUp       key.Binding
@@ -55,6 +56,7 @@ func DefaultKeyMap() KeyMap {
 		CycleTheme:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		CycleSort:      key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "sort")),
 		SSH:            key.NewBinding(key.WithKeys("f12", "s"), key.WithHelp("F12/s", "ssh")),
+		Mirror:         key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "mirror pane")),
 		Up:             key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:           key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		SelectUp:       key.NewBinding(key.WithKeys("shift+up", "K"), key.WithHelp("S-↑/K", "select up")),

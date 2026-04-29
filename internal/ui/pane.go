@@ -32,6 +32,10 @@ type BrowserPane struct {
 
 	dirHistory []string
 	dirFuture  []string
+
+	// cursorMemory remembers the last selected entry display name per directory
+	// within a session. Keyed by directory path. Restored when re-entering a dir.
+	cursorMemory map[string]string
 }
 
 type ArchiveMount struct {
@@ -191,6 +195,24 @@ func (p *BrowserPane) EnsureVisible(pageSize int) {
 	if p.Offset < 0 {
 		p.Offset = 0
 	}
+}
+
+func (p *BrowserPane) SaveCursor(dirPath string, entryName string) {
+	if dirPath == "" || entryName == "" {
+		return
+	}
+	if p.cursorMemory == nil {
+		p.cursorMemory = map[string]string{}
+	}
+	p.cursorMemory[dirPath] = entryName
+}
+
+// LoadCursor returns the saved entry name for a directory, or empty string.
+func (p *BrowserPane) LoadCursor(dirPath string) string {
+	if p.cursorMemory == nil {
+		return ""
+	}
+	return p.cursorMemory[dirPath]
 }
 
 func (p *BrowserPane) InArchive() bool {
