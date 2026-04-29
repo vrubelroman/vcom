@@ -42,6 +42,7 @@ const (
 	modalArchiveType
 	modalArchiveProgress
 	modalSSHConnect
+	modalThemeSelect
 )
 
 type fileOpKind int
@@ -81,6 +82,12 @@ type modalState struct {
 	note    string
 	input   textinput.Model
 	pending *pendingOperation
+}
+
+type themeSelectorState struct {
+	names    []string // all theme names in order
+	cursor   int      // current cursor index in the list
+	original string   // the theme name before opening dialog (for Esc revert)
 }
 
 type previewMsg struct {
@@ -253,7 +260,8 @@ type Model struct {
 	archiveFormat   string
 	deleteKind      string // "trash" or "permanent" — selected in delete modal
 	ssh             *sshState
-	preSSHPath      string // original path before entering SSH mode
+	preSSHPath      string              // original path before entering SSH mode
+	themeSelector   *themeSelectorState // nil when not in theme selector dialog
 }
 
 func NewModel(cfg config.Config, configPath string) (Model, error) {
@@ -1187,7 +1195,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.toggleHidden()
 		case key.Matches(msg, m.keys.CycleTheme):
 			log.Printf("[KEY] Cycle theme")
-			return m.cycleTheme()
+			return m.openThemeSelector()
 		case key.Matches(msg, m.keys.CycleSort):
 			log.Printf("[KEY] Cycle sort")
 			return m.cycleSort()
@@ -1358,7 +1366,7 @@ func (m Model) View() string {
 			m.overlay.hide()
 		}
 		modalWidth := min(72, m.width-8)
-		if m.modal.kind == modalHelp {
+		if m.modal.kind == modalHelp || m.modal.kind == modalThemeSelect {
 			modalWidth = min(96, m.width-8)
 		}
 		view = overlayCenter(view, renderModal(m, m.palette, modalWidth), m.width)
@@ -1599,6 +1607,56 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ssh.inputs[m.ssh.inputFocus], cmd = m.ssh.inputs[m.ssh.inputFocus].Update(msg)
 			return m, cmd
 		}
+
+	case modalThemeSelect:
+		switch {
+		case msg.String() == "up" || msg.String() == "k":
+			if m.themeSelector == nil {
+				return m, nil
+			}
+			m.themeSelector.cursor--
+			if m.themeSelector.cursor < 0 {
+				m.themeSelector.cursor = 0
+			}
+			selected := m.themeSelector.names[m.themeSelector.cursor]
+			m.applyThemePreview(selected)
+			log.Printf("[THEME] Preview: %s", selected)
+			return m, nil
+		case msg.String() == "down" || msg.String() == "j":
+			if m.themeSelector == nil {
+				return m, nil
+			}
+			m.themeSelector.cursor++
+			if m.themeSelector.cursor >= len(m.themeSelector.names) {
+				m.themeSelector.cursor = len(m.themeSelector.names) - 1
+			}
+			selected := m.themeSelector.names[m.themeSelector.cursor]
+			m.applyThemePreview(selected)
+			log.Printf("[THEME] Preview: %s", selected)
+			return m, nil
+		case key.Matches(msg, m.keys.Confirm):
+			if m.themeSelector == nil {
+				return m, nil
+			}
+			selected := m.themeSelector.names[m.themeSelector.cursor]
+			m.finalizeTheme(selected)
+			m.themeSelector = nil
+			m.modal = modalState{}
+			m.status = fmt.Sprintf("Theme: %s", selected)
+			log.Printf("[THEME] Applied: %s", selected)
+			return m, nil
+		case isModalCloseKey(msg, m.keys):
+			if m.themeSelector == nil {
+				return m, nil
+			}
+			m.applyThemePreview(m.themeSelector.original)
+			m.themeSelector = nil
+			m.modal = modalState{}
+			m.status = "Theme unchanged"
+			log.Printf("[THEME] Reverted to: %s", m.cfg.UI.Theme)
+			return m, nil
+		}
+		return m, nil
 
 	case modalArchiveProgress:
 		if key.Matches(msg, m.keys.Background) {
@@ -2831,6 +2889,52 @@ func (m *Model) cycleTheme() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) openThemeSelector() (tea.Model, tea.Cmd) {
+	names := theme.Names()
+	current := m.cfg.UI.Theme
+	cursor := 0
+	for i, name := range names {
+		if name == current {
+			cursor = i
+			break
+		}
+	}
+	m.themeSelector = &themeSelectorState{
+		names:    names,
+		cursor:   cursor,
+		original: current,
+	}
+	m.modal = modalState{
+		kind: modalThemeSelect,
+	}
+	log.Printf("[THEME] Theme selector opened — current=%s cursor=%d", current, cursor)
+	return m, nil
+}
+
+func (m *Model) applyThemePreview(name string) {
+	palette, err := theme.Resolve(name)
+	if err != nil {
+		return
+	}
+	m.palette = palette
+}
+
+func (m *Model) finalizeTheme(name string) {
+	palette, err := theme.Resolve(name)
+	if err != nil {
+		m.status = err.Error()
+		return
+	}
+	m.cfg.UI.Theme = name
+	m.palette = palette
+	savedPath, saveErr := config.Save(m.cfg, m.configPath)
+	if saveErr != nil {
+		m.status = fmt.Sprintf("Theme: %s (save failed: %v)", name, saveErr)
+		return
+	}
+	m.configPath = savedPath
+}
+
 func copyTextToClipboard(text string) error {
 	if err := clipboard.WriteAll(text); err == nil {
 		return nil
@@ -3710,6 +3814,10 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 		return renderSSHConnectModal(m, palette, width)
 	}
 
+	if m.modal.kind == modalThemeSelect {
+		return renderThemeSelectModal(m, palette, width)
+	}
+
 	modal := m.modal
 	outerWidth := max(width, 8)
 	contentWidth := max(outerWidth-6, 1)
@@ -3744,6 +3852,133 @@ func renderModal(m Model, palette theme.Palette, width int) string {
 				lines = append(lines, renderModalNoteLine(raw, contentWidth, palette, noteStyle))
 			}
 		}
+	}
+
+	return box.Render(strings.Join(lines, "\n"))
+}
+
+func renderThemeSelectModal(m Model, palette theme.Palette, width int) string {
+	outerWidth := max(width, 8)
+	contentWidth := max(outerWidth-6, 1)
+
+	// Pre-compute name column width (align names left, swatches right)
+	themeNames := m.themeSelector.names
+	maxNameLen := 0
+	for _, name := range themeNames {
+		if len(name) > maxNameLen {
+			maxNameLen = len(name)
+		}
+	}
+	// Leave room for cursor (2 chars), name, spacing, and 5 swatches (10 chars)
+	swatchArea := 12                              // "  " gap + 5*"  " swatches = 12
+	nameColWidth := contentWidth - swatchArea - 3 // -3 for padding
+	if nameColWidth < 10 {
+		nameColWidth = 10
+	}
+
+	titleStyle := lipgloss.NewStyle().
+		Width(contentWidth).
+		Background(palette.Panel).
+		Bold(true).
+		Foreground(palette.Accent)
+
+	padStyle := lipgloss.NewStyle().
+		Width(contentWidth).
+		Background(palette.Panel)
+
+	textColStyle := lipgloss.NewStyle().
+		Width(nameColWidth).
+		Background(palette.Panel).
+		Foreground(palette.Text)
+
+	textColSelStyle := lipgloss.NewStyle().
+		Width(nameColWidth).
+		Background(palette.Selection).
+		Foreground(palette.Text)
+
+	cursorStyle := lipgloss.NewStyle().
+		Width(2).
+		Background(palette.Panel).
+		Foreground(palette.Accent)
+
+	cursorSelStyle := lipgloss.NewStyle().
+		Width(2).
+		Background(palette.Selection).
+		Foreground(palette.Accent)
+
+	instructions := lipgloss.NewStyle().
+		Width(contentWidth).
+		Background(palette.Panel).
+		Foreground(palette.Muted).
+		Render("↑/↓ navigate · Enter apply · Esc cancel")
+
+	box := lipgloss.NewStyle().
+		Width(contentWidth).
+		Padding(1, 2).
+		Background(palette.Panel).
+		Foreground(palette.Text).
+		BorderStyle(lipgloss.DoubleBorder()).
+		BorderForeground(palette.BorderActive).
+		BorderBackground(palette.Panel)
+
+	spacer := padStyle.Render(" ")
+
+	lines := []string{
+		titleStyle.Render("Select Theme"),
+		spacer,
+		instructions,
+		spacer,
+	}
+
+	for i, name := range themeNames {
+		tp, err := theme.Resolve(name)
+		if err != nil {
+			continue
+		}
+
+		// Determine if this is the selected row
+		isSelected := i == m.themeSelector.cursor
+
+		// Cursor indicator
+		var cursorPart string
+		if isSelected {
+			cursorPart = cursorSelStyle.Render("▸")
+		} else {
+			cursorPart = cursorStyle.Render(" ")
+		}
+
+		// Name part with padding to align
+		paddedName := fmt.Sprintf("%-*s", maxNameLen, name)
+		var namePart string
+		if isSelected {
+			namePart = textColSelStyle.Render(paddedName)
+		} else {
+			namePart = textColStyle.Render(paddedName)
+		}
+
+		// Swatches use the resolved theme's palette colors
+		// Background for swatches depends on whether row is selected
+		swatchBg := palette.Panel
+		if isSelected {
+			swatchBg = palette.Selection
+		}
+		swatch := lipgloss.NewStyle().Background(swatchBg).Render(
+			lipgloss.NewStyle().Background(tp.Background).Render("  ") +
+				lipgloss.NewStyle().Background(tp.Panel).Render("  ") +
+				lipgloss.NewStyle().Background(tp.Accent).Render("  ") +
+				lipgloss.NewStyle().Background(tp.Text).Render("  ") +
+				lipgloss.NewStyle().Background(tp.Selection).Render("  "),
+		)
+
+		// Gap between name and swatches
+		gapStyle := lipgloss.NewStyle().
+			Width(1).
+			Background(swatchBg)
+		gap := gapStyle.Render(" ")
+
+		// Build the row
+		row := cursorPart + namePart + gap + swatch
+		lines = append(lines, row)
 	}
 
 	return box.Render(strings.Join(lines, "\n"))

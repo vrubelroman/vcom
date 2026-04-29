@@ -53,7 +53,7 @@ func DefaultKeyMap() KeyMap {
 		Info:           key.NewBinding(key.WithKeys("f9", "o"), key.WithHelp("F9/o", "info")),
 		SelectText:     key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("C-t", "text select")),
 		ToggleHidden:   key.NewBinding(key.WithKeys("."), key.WithHelp(".", "hidden")),
-		CycleTheme:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
+		CycleTheme:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "select theme")),
 		CycleSort:      key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "sort")),
 		SSH:            key.NewBinding(key.WithKeys("f12", "s"), key.WithHelp("F12/s", "ssh")),
 		Mirror:         key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "mirror pane")),
