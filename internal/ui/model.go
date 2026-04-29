@@ -330,7 +330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case previewMsg:
-		log.Printf("[EVENT] previewMsg: path=%s kind=%d", msg.entryPath, msg.preview.Kind)
+		log.Printf("[EVENT] previewMsg: path=%s kind=%s", msg.entryPath, msg.preview.Kind)
 		if selected, ok := m.activePane().Selected(); ok && selected.Path == msg.entryPath {
 			m.applyPreview(msg.preview)
 		}
@@ -1269,7 +1269,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modalMkdir, modalRename:
 		switch {
 		case msg.String() == "esc":
-			log.Printf("[MODAL] %s — cancelled (Esc)", m.modal.kind)
+			log.Printf("[MODAL] %d — cancelled (Esc)", m.modal.kind)
 			m.modal = modalState{}
 			m.status = "Cancelled"
 			return m, nil
@@ -5161,7 +5161,7 @@ func (m *Model) handleSSHConnectHost() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	log.Printf("[ACTION] SSHConnectHost: host=%s user=%s hostname=%s port=%d",
+	log.Printf("[ACTION] SSHConnectHost: host=%s user=%s hostname=%s port=%s",
 		host.Name, host.User, host.HostName, host.Port)
 	m.status = fmt.Sprintf("Connecting to %s@%s...", host.User, host.HostName)
 
