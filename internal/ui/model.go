@@ -1174,8 +1174,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.toggleVisualMode()
 			}
 			return m, nil
-		case key.Matches(msg, m.keys.Edit):
-			return m.handleEdit()
 		case key.Matches(msg, m.keys.Archive):
 			return m.handleArchive()
 		case key.Matches(msg, m.keys.Info):
@@ -1257,8 +1255,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Delete):
 			return m.handleDelete()
-		case key.Matches(msg, m.keys.ExtractArchive):
-			return m.handleExtractArchive()
+		case key.Matches(msg, m.keys.Unpack):
+			return m.handleUnpack()
 		case key.Matches(msg, m.keys.SSH):
 			log.Printf("[KEY] SSH toggle — active=%s path=%s", m.active, activePane.Path)
 			return m.handleSSHToggle()
@@ -2350,11 +2348,11 @@ func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 	return m, trashPlanCmd(sources)
 }
 
-func (m *Model) handleExtractArchive() (tea.Model, tea.Cmd) {
+func (m *Model) handleUnpack() (tea.Model, tea.Cmd) {
 	selected, ok := m.activePane().Selected()
 	if !ok || !isArchiveEntry(selected) {
-		log.Printf("[SKIP] ExtractArchive: no archive selected")
-		m.status = "Select an archive file to extract"
+		log.Printf("[SKIP] Unpack: no archive selected")
+		m.status = "Select an archive file to unpack"
 		return m, nil
 	}
 
@@ -2362,10 +2360,10 @@ func (m *Model) handleExtractArchive() (tea.Model, tea.Cmd) {
 	targetPane := m.passivePane()
 	targetDir := targetPane.Path
 
-	log.Printf("[ACTION] ExtractArchive: source=%s target=%s", selected.Path, targetDir)
+	log.Printf("[ACTION] Unpack: source=%s target=%s", selected.Path, targetDir)
 
 	// Show confirm dialog before extracting
-	title := fmt.Sprintf("Extract %s?", selected.DisplayName())
+	title := fmt.Sprintf("Unpack %s?", selected.DisplayName())
 	body := fmt.Sprintf("Archive: %s\nTarget:  %s", selected.Path, targetDir)
 	note := "Enter / y to confirm, Esc / n to cancel"
 	pending := pendingOperation{

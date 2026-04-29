@@ -7,7 +7,6 @@ type KeyMap struct {
 	Visual         key.Binding
 	Caret          key.Binding
 	View           key.Binding
-	Edit           key.Binding
 	Rename         key.Binding
 	Info           key.Binding
 	Archive        key.Binding
@@ -32,7 +31,7 @@ type KeyMap struct {
 	Move           key.Binding
 	Mkdir          key.Binding
 	Delete         key.Binding
-	ExtractArchive key.Binding
+	Unpack         key.Binding
 	Confirm        key.Binding
 	Background     key.Binding
 	ProgressCancel key.Binding
@@ -49,7 +48,6 @@ func DefaultKeyMap() KeyMap {
 		View:           key.NewBinding(key.WithKeys("f3", "v"), key.WithHelp("F3/v", "view")),
 		Visual:         key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "visual")),
 		Caret:          key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "caret")),
-		Edit:           key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 		Archive:        key.NewBinding(key.WithKeys("f4", "a"), key.WithHelp("F4/a", "archive")),
 		Info:           key.NewBinding(key.WithKeys("f9", "o"), key.WithHelp("F9/o", "info")),
 		SelectText:     key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("C-t", "text select")),
@@ -73,7 +71,7 @@ func DefaultKeyMap() KeyMap {
 		Move:           key.NewBinding(key.WithKeys("f6", "m"), key.WithHelp("F6/m", "move")),
 		Mkdir:          key.NewBinding(key.WithKeys("f7", "n"), key.WithHelp("F7/n", "mkdir")),
 		Delete:         key.NewBinding(key.WithKeys("f8", "delete", "x"), key.WithHelp("F8/x", "delete")),
-		ExtractArchive: key.NewBinding(key.WithKeys("f11", "e"), key.WithHelp("F11/e", "extract archive")),
+		Unpack:         key.NewBinding(key.WithKeys("f11", "e"), key.WithHelp("F11/e", "unpack")),
 		Confirm:        key.NewBinding(key.WithKeys("enter", "y"), key.WithHelp("Enter/y", "confirm")),
 		Background:     key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "background")),
 		ProgressCancel: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "cancel transfer")),
@@ -85,13 +83,13 @@ func DefaultKeyMap() KeyMap {
 }
 
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Help, k.Rename, k.View, k.Archive, k.Copy, k.Move, k.Mkdir, k.Delete, k.Info, k.Quit, k.ExtractArchive, k.SSH}
+	return []key.Binding{k.Help, k.Rename, k.View, k.Archive, k.Copy, k.Move, k.Mkdir, k.Delete, k.Info, k.Quit, k.Unpack, k.SSH}
 }
 
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Help, k.Up, k.Down, k.SelectUp, k.SelectDown, k.Open, k.Back},
-		{k.Rename, k.View, k.Caret, k.Edit, k.Archive, k.Copy, k.Move, k.Delete},
-		{k.ExtractArchive, k.SelectText, k.DirSize, k.Refresh, k.ToggleHidden, k.CycleSort, k.CycleTheme, k.Quit},
+		{k.Rename, k.View, k.Caret, k.Archive, k.Copy, k.Move, k.Delete},
+		{k.Unpack, k.SelectText, k.DirSize, k.Refresh, k.ToggleHidden, k.CycleSort, k.CycleTheme, k.Quit},
 	}
 }
