@@ -44,6 +44,23 @@ func ExtractArchiveToTemp(sourcePath string) (string, error) {
 	return tempDir, nil
 }
 
+// ExtractArchiveToDir extracts an archive to the specified target directory.
+// Unlike ExtractArchiveToTemp, it extracts directly to targetDir without
+// creating a temporary directory.
+func ExtractArchiveToDir(sourcePath, targetDir string) error {
+	sourceLower := strings.ToLower(sourcePath)
+	switch {
+	case strings.HasSuffix(sourceLower, ".zip"):
+		return extractZipArchive(sourcePath, targetDir)
+	case strings.HasSuffix(sourceLower, ".tar"):
+		return extractTarArchive(sourcePath, targetDir, false)
+	case strings.HasSuffix(sourceLower, ".tar.gz"), strings.HasSuffix(sourceLower, ".tgz"):
+		return extractTarArchive(sourcePath, targetDir, true)
+	default:
+		return fmt.Errorf("archive format is not supported: %s", filepath.Ext(sourcePath))
+	}
+}
+
 func extractZipArchive(sourcePath string, targetDir string) error {
 	reader, err := zip.OpenReader(sourcePath)
 	if err != nil {

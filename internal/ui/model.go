@@ -57,6 +57,7 @@ const (
 	opArchive
 	opExecute
 	opDeleteHost
+	opExtractArchive
 )
 
 type pendingOperation struct {
@@ -248,6 +249,7 @@ type Model struct {
 	nextArchiveJob  int
 	archiveProgress chan tea.Msg
 	archiveFormat   string
+	deleteKind      string // "trash" or "permanent" — selected in delete modal
 	ssh             *sshState
 	preSSHPath      string // original path before entering SSH mode
 }
@@ -511,6 +513,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case opExecute:
 			m.status = "Executable closed"
 			return m, tea.Batch(m.loadPreviewCmd(), enableMouseCmd())
+		case opExtractArchive:
+			if msg.err != nil {
+				log.Printf("[ERROR] opMsg: ExtractArchive failed — err=%v", msg.err)
+				m.status = msg.err.Error()
+				return m, nil
+			}
+			log.Printf("[ACTION] opMsg: ExtractArchive done — source=%s target=%s", msg.sourcePath, msg.targetPath)
+			m.status = fmt.Sprintf("Extracted to %s", msg.targetPath)
+			// Reload the target (passive) pane so extracted files appear
+			targetID := PaneRight
+			if m.active == PaneRight {
+				targetID = PaneLeft
+			}
+			_ = m.reloadPane(targetID, "")
+			return m, nil
 		}
 
 		// Reload panes — use remote reload for remote mounts
@@ -593,20 +610,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.kind, len(msg.sourcePaths), msg.stats.FilesTotal, msg.stats.BytesTotal, msg.srcClient != nil)
 
 		title := "Move selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + " to trash?"
-		if msg.kind == opPermanentDelete {
-			title = "Permanently delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + "?"
-		} else if msg.srcClient != nil {
+		if msg.srcClient != nil {
 			title = "Delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + " from remote?"
+		} else if m.deleteKind == "permanent" {
+			title = "Permanently delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + "?"
 		}
 		bodyLines := []string{
 			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
 			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
 			fmt.Sprintf("Size:  %s", formatSize(msg.stats.BytesTotal, true)),
 		}
+		note := "confirm-actions"
+		if msg.srcClient == nil {
+			note = fmt.Sprintf("Mode: %s  (d to change)\nEnter / y to confirm, Esc / n to cancel", m.deleteKind)
+		}
 		m.openConfirmModal(
 			title,
 			strings.Join(bodyLines, "\n"),
-			"confirm-actions",
+			note,
 			pendingOperation{
 				kind:        msg.kind,
 				sourcePaths: append([]string(nil), msg.sourcePaths...),
@@ -1177,8 +1198,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Delete):
 			return m.handleDelete()
-		case key.Matches(msg, m.keys.PermanentDelete):
-			return m.handlePermanentDelete()
+		case key.Matches(msg, m.keys.ExtractArchive):
+			return m.handleExtractArchive()
 		case key.Matches(msg, m.keys.SSH):
 			log.Printf("[KEY] SSH toggle — active=%s path=%s", m.active, activePane.Path)
 			return m.handleSSHToggle()
@@ -1386,9 +1407,48 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.remoteDeleteCmd(pending.sourcePaths, pending.srcClient)
 			}
 
+			// Adjust delete kind based on mode toggle
+			if pending.kind == opDelete || pending.kind == opPermanentDelete {
+				if m.deleteKind == "permanent" && pending.kind == opDelete {
+					pending.kind = opPermanentDelete
+				} else if m.deleteKind == "trash" && pending.kind == opPermanentDelete {
+					pending.kind = opDelete
+				}
+			}
+
+			// Extract archive
+			if pending.kind == opExtractArchive {
+				m.busy = true
+				log.Printf("[MODAL] Confirm — extract archive source=%s target=%s", pending.sourcePaths[0], pending.targetDir)
+				return m, extractArchiveCmd(pending.sourcePaths[0], pending.targetDir)
+			}
+
 			m.busy = true
 			log.Printf("[MODAL] Confirm — %s sources=%d", operationVerb(pending.kind), len(pending.sourcePaths))
 			return m, pending.cmd()
+		case msg.String() == "d":
+			if m.modal.pending == nil {
+				return m, nil
+			}
+			pkind := m.modal.pending.kind
+			if (pkind == opDelete || pkind == opPermanentDelete) && m.modal.pending.srcClient == nil {
+				if m.deleteKind == "permanent" {
+					m.deleteKind = "trash"
+				} else {
+					m.deleteKind = "permanent"
+				}
+				sources := m.modal.pending.sourcePaths
+				if m.deleteKind == "permanent" {
+					m.modal.title = "Permanently delete selected entr" + pluralSuffix(len(sources), "y", "ies") + "?"
+				} else {
+					m.modal.title = "Move selected entr" + pluralSuffix(len(sources), "y", "ies") + " to trash?"
+				}
+				m.modal.note = fmt.Sprintf(
+					"Mode: %s  (d to change)\nEnter / y to confirm, Esc / n to cancel",
+					m.deleteKind,
+				)
+				return m, nil
+			}
 		}
 
 	case modalArchiveType:
@@ -2188,7 +2248,7 @@ func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 
 	log.Printf("[ACTION] Delete: sources=%v remote=%v", sources, m.activePane().InRemote())
 
-	// Remote delete via SFTP (no trash on remote)
+	// Remote delete via SFTP (no trash on remote — always permanent)
 	if mount, ok := m.activePane().CurrentRemote(); ok {
 		log.Printf("[ACTION] Delete: remote — sources=%v", sources)
 		m.busy = true
@@ -2196,47 +2256,53 @@ func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 		return m, m.remoteDeletePlanCmd(sources, mount.Client)
 	}
 
+	// Default to permanent delete
+	m.deleteKind = "permanent"
+
 	if !m.cfg.Behavior.ConfirmDelete {
-		log.Printf("[ACTION] Delete: immediate trash — sources=%v", sources)
-		m.busy = true
-		m.status = fmt.Sprintf("Moving %d entr%s to trash", len(sources), pluralSuffix(len(sources), "y", "ies"))
-		return m, trashPathsCmd(sources)
+		// No plan needed — show a simple confirm dialog with mode toggle
+		title := "Permanently delete selected entr" + pluralSuffix(len(sources), "y", "ies") + "?"
+		body := fmt.Sprintf("Items: %d", len(sources))
+		note := fmt.Sprintf("Mode: %s  (d to change)\nEnter / y to confirm, Esc / n to cancel", m.deleteKind)
+		pending := pendingOperation{
+			kind:        opPermanentDelete,
+			sourcePaths: append([]string(nil), sources...),
+		}
+		m.openConfirmModal(title, body, note, pending)
+		return m, nil
 	}
 
-	log.Printf("[ACTION] Delete: plan — sources=%v", sources)
+	// Compute plan first, then show confirm modal with mode toggle
 	m.busy = true
-	m.status = "Calculating trash size"
+	m.status = "Calculating delete size"
 	return m, trashPlanCmd(sources)
 }
 
-func (m *Model) handlePermanentDelete() (tea.Model, tea.Cmd) {
-	if m.activePane().InArchive() {
-		log.Printf("[SKIP] PermanentDelete: archive read-only")
-		m.status = "Archive mode is read-only; permanent delete is disabled"
+func (m *Model) handleExtractArchive() (tea.Model, tea.Cmd) {
+	selected, ok := m.activePane().Selected()
+	if !ok || !isArchiveEntry(selected) {
+		log.Printf("[SKIP] ExtractArchive: no archive selected")
+		m.status = "Select an archive file to extract"
 		return m, nil
 	}
 
-	// SSH host list — delete user-added hosts (same as F8)
-	if m.activePane().Path == "ssh://" {
-		return m.handleSSHHostDelete()
-	}
+	// Target is the opposite pane's current directory
+	targetPane := m.passivePane()
+	targetDir := targetPane.Path
 
-	sources := m.operationSources()
-	if len(sources) == 0 {
-		log.Printf("[SKIP] PermanentDelete: no sources")
-		m.status = "Nothing to delete"
-		return m, nil
-	}
-	log.Printf("[ACTION] PermanentDelete: sources=%v confirm=%v", sources, m.cfg.Behavior.ConfirmDelete)
-	if !m.cfg.Behavior.ConfirmDelete {
-		m.busy = true
-		m.status = fmt.Sprintf("Permanently deleting %d entr%s", len(sources), pluralSuffix(len(sources), "y", "ies"))
-		return m, deletePathsPermanentCmd(sources)
-	}
+	log.Printf("[ACTION] ExtractArchive: source=%s target=%s", selected.Path, targetDir)
 
-	m.busy = true
-	m.status = "Calculating delete size"
-	return m, deletePlanPermanentCmd(sources)
+	// Show confirm dialog before extracting
+	title := fmt.Sprintf("Extract %s?", selected.DisplayName())
+	body := fmt.Sprintf("Archive: %s\nTarget:  %s", selected.Path, targetDir)
+	note := "Enter / y to confirm, Esc / n to cancel"
+	pending := pendingOperation{
+		kind:        opExtractArchive,
+		sourcePaths: []string{selected.Path},
+		targetDir:   targetDir,
+	}
+	m.openConfirmModal(title, body, note, pending)
+	return m, nil
 }
 
 func (m *Model) handleView() (tea.Model, tea.Cmd) {
@@ -2794,8 +2860,8 @@ func (m *Model) openHelpModal() {
 		"  t              cycle theme",
 		"",
 		"Dialogs and Transfers",
-		"  F8 / x         move selected entry to trash",
-		"  F11 / d        permanently delete selected entry",
+		"  F8 / x         delete (trash or permanent, d to toggle)",
+		"  F11            extract archive to opposite pane",
 		"  r              rename selected entry",
 		"  Enter / y      confirm action",
 		"  Esc / n        cancel action",
@@ -4600,6 +4666,13 @@ func deletePlanPermanentCmd(sourcePaths []string) tea.Cmd {
 			stats:       stats,
 			err:         err,
 		}
+	}
+}
+
+func extractArchiveCmd(sourcePath, targetDir string) tea.Cmd {
+	return func() tea.Msg {
+		err := vfs.ExtractArchiveToDir(sourcePath, targetDir)
+		return opMsg{kind: opExtractArchive, sourcePath: sourcePath, targetPath: targetDir, err: err}
 	}
 }
 
