@@ -159,7 +159,7 @@ icon_mode = "auto" # auto | nerd | ascii
 
 ## Themes
 
-Built-in themes (use `T` to cycle or set `ui.theme` in config):
+Built-in themes (press `t` to open theme selector or set `ui.theme` in config):
 
 - `catppuccin-mocha` (default)
 - `catppuccin-macchiato`
