@@ -14,6 +14,9 @@ import (
 )
 
 func ExtractArchiveToTemp(sourcePath string) (string, error) {
+	// Count total files for progress reporting
+	totalFiles, totalBytes := countArchiveEntries(sourcePath)
+
 	tempDir, err := os.MkdirTemp("", "vcom-archive-")
 	if err != nil {
 		return "", err
@@ -26,15 +29,15 @@ func ExtractArchiveToTemp(sourcePath string) (string, error) {
 	sourceLower := strings.ToLower(sourcePath)
 	switch {
 	case strings.HasSuffix(sourceLower, ".zip"):
-		if err := extractZipArchive(sourcePath, tempDir); err != nil {
+		if err := extractZipArchive(sourcePath, tempDir, nil, totalFiles, totalBytes); err != nil {
 			return cleanupOnErr(err)
 		}
 	case strings.HasSuffix(sourceLower, ".tar"):
-		if err := extractTarArchive(sourcePath, tempDir, false); err != nil {
+		if err := extractTarArchive(sourcePath, tempDir, false, nil, totalFiles, totalBytes); err != nil {
 			return cleanupOnErr(err)
 		}
 	case strings.HasSuffix(sourceLower, ".tar.gz"), strings.HasSuffix(sourceLower, ".tgz"):
-		if err := extractTarArchive(sourcePath, tempDir, true); err != nil {
+		if err := extractTarArchive(sourcePath, tempDir, true, nil, totalFiles, totalBytes); err != nil {
 			return cleanupOnErr(err)
 		}
 	default:
@@ -46,28 +49,96 @@ func ExtractArchiveToTemp(sourcePath string) (string, error) {
 
 // ExtractArchiveToDir extracts an archive to the specified target directory.
 // Unlike ExtractArchiveToTemp, it extracts directly to targetDir without
-// creating a temporary directory.
-func ExtractArchiveToDir(sourcePath, targetDir string) error {
+// creating a temporary directory. The progress callback is called after each
+// file is extracted; it may be nil.
+func ExtractArchiveToDir(sourcePath, targetDir string, progress func(CopyProgress)) error {
+	totalFiles, totalBytes := countArchiveEntries(sourcePath)
 	sourceLower := strings.ToLower(sourcePath)
 	switch {
 	case strings.HasSuffix(sourceLower, ".zip"):
-		return extractZipArchive(sourcePath, targetDir)
+		return extractZipArchive(sourcePath, targetDir, progress, totalFiles, totalBytes)
 	case strings.HasSuffix(sourceLower, ".tar"):
-		return extractTarArchive(sourcePath, targetDir, false)
+		return extractTarArchive(sourcePath, targetDir, false, progress, totalFiles, totalBytes)
 	case strings.HasSuffix(sourceLower, ".tar.gz"), strings.HasSuffix(sourceLower, ".tgz"):
-		return extractTarArchive(sourcePath, targetDir, true)
+		return extractTarArchive(sourcePath, targetDir, true, progress, totalFiles, totalBytes)
 	default:
 		return fmt.Errorf("archive format is not supported: %s", filepath.Ext(sourcePath))
 	}
 }
 
-func extractZipArchive(sourcePath string, targetDir string) error {
+// countArchiveEntries counts the total number of files and total uncompressed
+// bytes in an archive without extracting. Used for progress reporting.
+func countArchiveEntries(sourcePath string) (int64, int64) {
+	sourceLower := strings.ToLower(sourcePath)
+	switch {
+	case strings.HasSuffix(sourceLower, ".zip"):
+		return countZipEntries(sourcePath)
+	case strings.HasSuffix(sourceLower, ".tar"), strings.HasSuffix(sourceLower, ".tar.gz"), strings.HasSuffix(sourceLower, ".tgz"):
+		return countTarEntries(sourcePath)
+	default:
+		return 0, 0
+	}
+}
+
+func countZipEntries(sourcePath string) (int64, int64) {
+	r, err := zip.OpenReader(sourcePath)
+	if err != nil {
+		return 0, 0
+	}
+	defer r.Close()
+	var files, bytes int64
+	for _, f := range r.File {
+		if !f.FileInfo().IsDir() {
+			files++
+			bytes += int64(f.UncompressedSize64)
+		}
+	}
+	return files, bytes
+}
+
+func countTarEntries(sourcePath string) (int64, int64) {
+	f, err := os.Open(sourcePath)
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+
+	var reader io.Reader = f
+	if strings.HasSuffix(strings.ToLower(sourcePath), ".tar.gz") || strings.HasSuffix(strings.ToLower(sourcePath), ".tgz") {
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			return 0, 0
+		}
+		defer gr.Close()
+		reader = gr
+	}
+
+	tarReader := tar.NewReader(reader)
+	var files, bytes int64
+	for {
+		hdr, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA {
+			files++
+			bytes += hdr.Size
+		}
+	}
+	return files, bytes
+}
+
+func extractZipArchive(sourcePath string, targetDir string, progress func(CopyProgress), totalFiles, totalBytes int64) error {
 	reader, err := zip.OpenReader(sourcePath)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
 
+	var filesDone int64
 	for _, file := range reader.File {
 		relPath, ok := safeArchivePath(file.Name)
 		if !ok {
@@ -94,11 +165,22 @@ func extractZipArchive(sourcePath string, targetDir string) error {
 			return err
 		}
 		src.Close()
+
+		filesDone++
+		if progress != nil {
+			progress(CopyProgress{
+				FilesDone:  int(filesDone),
+				FilesTotal: int(totalFiles),
+				BytesDone:  0,
+				BytesTotal: totalBytes,
+				Stage:      "Extracting data",
+			})
+		}
 	}
 	return nil
 }
 
-func extractTarArchive(sourcePath string, targetDir string, gzipped bool) error {
+func extractTarArchive(sourcePath string, targetDir string, gzipped bool, progress func(CopyProgress), totalFiles, totalBytes int64) error {
 	file, err := os.Open(sourcePath)
 	if err != nil {
 		return err
@@ -116,6 +198,7 @@ func extractTarArchive(sourcePath string, targetDir string, gzipped bool) error 
 	}
 
 	tarReader := tar.NewReader(reader)
+	var filesDone int64
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -141,6 +224,16 @@ func extractTarArchive(sourcePath string, targetDir string, gzipped bool) error 
 			}
 			if err := writeArchiveFile(fullPath, tarReader, os.FileMode(header.Mode)); err != nil {
 				return err
+			}
+			filesDone++
+			if progress != nil {
+				progress(CopyProgress{
+					FilesDone:  int(filesDone),
+					FilesTotal: int(totalFiles),
+					BytesDone:  0,
+					BytesTotal: totalBytes,
+					Stage:      "Extracting data",
+				})
 			}
 		}
 	}
