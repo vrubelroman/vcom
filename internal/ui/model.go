@@ -27,7 +27,7 @@ import (
 	"vcom/internal/theme"
 )
 
-const version = "v0.2.2"
+const version = "v0.2.3"
 
 type modalKind int
 
