@@ -26,18 +26,21 @@ func ExtractArchiveToTemp(sourcePath string) (string, error) {
 		return "", extractErr
 	}
 
+	// Use background context for temp extraction (no cancellation needed)
+	ctx := context.Background()
+
 	sourceLower := strings.ToLower(sourcePath)
 	switch {
 	case strings.HasSuffix(sourceLower, ".zip"):
-		if err := extractZipArchive(sourcePath, tempDir, nil, totalFiles, totalBytes); err != nil {
+		if err := extractZipArchive(ctx, sourcePath, tempDir, nil, totalFiles, totalBytes); err != nil {
 			return cleanupOnErr(err)
 		}
 	case strings.HasSuffix(sourceLower, ".tar"):
-		if err := extractTarArchive(sourcePath, tempDir, false, nil, totalFiles, totalBytes); err != nil {
+		if err := extractTarArchive(ctx, sourcePath, tempDir, false, nil, totalFiles, totalBytes); err != nil {
 			return cleanupOnErr(err)
 		}
 	case strings.HasSuffix(sourceLower, ".tar.gz"), strings.HasSuffix(sourceLower, ".tgz"):
-		if err := extractTarArchive(sourcePath, tempDir, true, nil, totalFiles, totalBytes); err != nil {
+		if err := extractTarArchive(ctx, sourcePath, tempDir, true, nil, totalFiles, totalBytes); err != nil {
 			return cleanupOnErr(err)
 		}
 	default:
@@ -50,17 +53,17 @@ func ExtractArchiveToTemp(sourcePath string) (string, error) {
 // ExtractArchiveToDir extracts an archive to the specified target directory.
 // Unlike ExtractArchiveToTemp, it extracts directly to targetDir without
 // creating a temporary directory. The progress callback is called after each
-// file is extracted; it may be nil.
-func ExtractArchiveToDir(sourcePath, targetDir string, progress func(CopyProgress)) error {
+// file is extracted; it may be nil. Cancellation is supported via ctx.
+func ExtractArchiveToDir(ctx context.Context, sourcePath, targetDir string, progress func(CopyProgress)) error {
 	totalFiles, totalBytes := countArchiveEntries(sourcePath)
 	sourceLower := strings.ToLower(sourcePath)
 	switch {
 	case strings.HasSuffix(sourceLower, ".zip"):
-		return extractZipArchive(sourcePath, targetDir, progress, totalFiles, totalBytes)
+		return extractZipArchive(ctx, sourcePath, targetDir, progress, totalFiles, totalBytes)
 	case strings.HasSuffix(sourceLower, ".tar"):
-		return extractTarArchive(sourcePath, targetDir, false, progress, totalFiles, totalBytes)
+		return extractTarArchive(ctx, sourcePath, targetDir, false, progress, totalFiles, totalBytes)
 	case strings.HasSuffix(sourceLower, ".tar.gz"), strings.HasSuffix(sourceLower, ".tgz"):
-		return extractTarArchive(sourcePath, targetDir, true, progress, totalFiles, totalBytes)
+		return extractTarArchive(ctx, sourcePath, targetDir, true, progress, totalFiles, totalBytes)
 	default:
 		return fmt.Errorf("archive format is not supported: %s", filepath.Ext(sourcePath))
 	}
@@ -131,7 +134,7 @@ func countTarEntries(sourcePath string) (int64, int64) {
 	return files, bytes
 }
 
-func extractZipArchive(sourcePath string, targetDir string, progress func(CopyProgress), totalFiles, totalBytes int64) error {
+func extractZipArchive(ctx context.Context, sourcePath string, targetDir string, progress func(CopyProgress), totalFiles, totalBytes int64) error {
 	reader, err := zip.OpenReader(sourcePath)
 	if err != nil {
 		return err
@@ -140,6 +143,12 @@ func extractZipArchive(sourcePath string, targetDir string, progress func(CopyPr
 
 	var filesDone int64
 	for _, file := range reader.File {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		relPath, ok := safeArchivePath(file.Name)
 		if !ok {
 			continue
@@ -180,7 +189,7 @@ func extractZipArchive(sourcePath string, targetDir string, progress func(CopyPr
 	return nil
 }
 
-func extractTarArchive(sourcePath string, targetDir string, gzipped bool, progress func(CopyProgress), totalFiles, totalBytes int64) error {
+func extractTarArchive(ctx context.Context, sourcePath string, targetDir string, gzipped bool, progress func(CopyProgress), totalFiles, totalBytes int64) error {
 	file, err := os.Open(sourcePath)
 	if err != nil {
 		return err
@@ -200,6 +209,12 @@ func extractTarArchive(sourcePath string, targetDir string, gzipped bool, progre
 	tarReader := tar.NewReader(reader)
 	var filesDone int64
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		header, err := tarReader.Next()
 		if err == io.EOF {
 			break

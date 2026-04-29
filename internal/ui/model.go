@@ -683,15 +683,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.reloadPane(PaneLeft, activeSelection)
 			_ = m.reloadPane(PaneRight, activeSelection)
 			if msg.err == context.Canceled {
-				if m.archiveJob.kind == "extract" {
+				switch m.archiveJob.kind {
+				case "extract":
 					m.status = "Extraction cancelled"
-				} else {
+				case "delete":
+					m.status = "Delete cancelled"
+				default:
 					m.status = "Archiving cancelled"
 				}
 			} else {
-				if m.archiveJob.kind == "extract" {
+				switch m.archiveJob.kind {
+				case "extract":
 					m.status = fmt.Sprintf("Extraction failed: %v", msg.err)
-				} else {
+				case "delete":
+					m.status = fmt.Sprintf("Delete failed: %v", msg.err)
+				default:
 					m.status = fmt.Sprintf("Archiving failed: %v", msg.err)
 				}
 			}
@@ -722,6 +728,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					kind:  modalNotice,
 					title: "Extraction complete",
 					body:  "Archive extracted successfully.",
+					note:  "Press Esc to close",
+				}
+			}
+			return m, cmd
+		}
+
+		// Delete completion — reload both panes, clear marks
+		if m.archiveJob.kind == "delete" {
+			log.Printf("[DONE] deleteDoneMsg: job=%d sources=%d", msg.jobID, len(msg.sourcePaths))
+			sourceCount := len(m.archiveJob.sourcePaths)
+			verb := "moved to trash"
+			if m.archiveJob.progress.Stage == "delete permanently" {
+				verb = "deleted"
+			}
+			m.status = fmt.Sprintf("%d entr%s %s", sourceCount, pluralSuffix(sourceCount, "y", "ies"), verb)
+			activeSelection := selectedName(m.activePane())
+			_ = m.reloadPane(PaneLeft, activeSelection)
+			_ = m.reloadPane(PaneRight, activeSelection)
+			background := m.archiveJob.background
+			m.archiveJob = nil
+			m.activePane().ClearMarks()
+
+			cmd := m.loadPreviewCmd()
+			if m.modal.kind == modalArchiveProgress {
+				m.modal = modalState{}
+			}
+			if background {
+				m.modal = modalState{
+					kind:  modalNotice,
+					title: "Delete complete",
+					body:  fmt.Sprintf("%d entr%s %s.", sourceCount, pluralSuffix(sourceCount, "y", "ies"), verb),
 					note:  "Press Esc to close",
 				}
 			}
@@ -1436,6 +1473,16 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else if m.deleteKind == "trash" && pending.kind == opPermanentDelete {
 					pending.kind = opDelete
 				}
+			}
+
+			// Local delete with progress dialog
+			if (pending.kind == opDelete || pending.kind == opPermanentDelete) && pending.srcClient == nil {
+				if m.archiveJob != nil {
+					m.status = "Delete is already running"
+					return m, nil
+				}
+				log.Printf("[MODAL] Confirm — local %s sources=%d", operationVerb(pending.kind), len(pending.sourcePaths))
+				return m, m.startDeleteJob(pending.kind, pending.sourcePaths)
 			}
 
 			// Extract archive
@@ -3981,12 +4028,13 @@ func renderArchiveProgressModal(job archiveJobState, palette theme.Palette, widt
 
 	progress := job.progress
 	ratio := 0.0
-	if job.kind == "extract" {
-		// Extraction: progress by file count (no byte tracking during extraction)
+	switch job.kind {
+	case "extract", "delete":
+		// Extraction/delete: progress by file count (no byte tracking)
 		if progress.FilesTotal > 0 {
 			ratio = float64(progress.FilesDone) / float64(progress.FilesTotal)
 		}
-	} else {
+	default:
 		if progress.BytesTotal > 0 {
 			ratio = float64(progress.BytesDone) / float64(progress.BytesTotal)
 		}
@@ -3994,16 +4042,24 @@ func renderArchiveProgressModal(job archiveJobState, palette theme.Palette, widt
 
 	stage := progress.Stage
 	if stage == "" {
-		if job.kind == "extract" {
+		switch job.kind {
+		case "extract":
 			stage = "Extracting data"
-		} else {
+		case "delete":
+			stage = "Deleting files"
+		default:
 			stage = "Archiving data"
 		}
 	}
 
-	title := "Archiving"
-	if job.kind == "extract" {
+	var title string
+	switch job.kind {
+	case "extract":
 		title = "Extracting"
+	case "delete":
+		title = "Deleting"
+	default:
+		title = "Archiving"
 	}
 
 	lines := []string{
@@ -4017,8 +4073,8 @@ func renderArchiveProgressModal(job archiveJobState, palette theme.Palette, widt
 		renderProgressStatLine("Files:", fmt.Sprintf("%d / %d", progress.FilesDone, progress.FilesTotal), contentWidth, palette),
 	}
 
-	// Only show size and speed for archive creation (not tracked during extraction)
-	if job.kind != "extract" {
+	// Only show size and speed for archive creation (not tracked during extraction/delete)
+	if job.kind == "archive" {
 		lines = append(lines,
 			renderProgressStatLine("Size:", fmt.Sprintf("%s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true)), contentWidth, palette),
 			renderProgressStatLine("Speed:", transferSpeed(progress.BytesDone, job.startedAt), contentWidth, palette),
@@ -4030,9 +4086,12 @@ func renderArchiveProgressModal(job archiveJobState, palette theme.Palette, widt
 		renderModalNoteLine("Background / b, Cancel / c", contentWidth, palette, mutedStyle),
 	)
 	if job.background {
-		if job.kind == "extract" {
+		switch job.kind {
+		case "extract":
 			lines = append(lines, mutedStyle.Render("Extraction continues in background"))
-		} else {
+		case "delete":
+			lines = append(lines, mutedStyle.Render("Delete continues in background"))
+		default:
 			lines = append(lines, mutedStyle.Render("Archive continues in background"))
 		}
 	}
@@ -4654,6 +4713,7 @@ func (m *Model) startArchiveJob(sourcePaths []string, targetDir string, format s
 func (m *Model) startExtractJob(sourcePath, targetDir string) tea.Cmd {
 	m.nextArchiveJob++
 	jobID := m.nextArchiveJob
+	ctx, cancel := context.WithCancel(context.Background())
 
 	m.archiveJob = &archiveJobState{
 		id:          jobID,
@@ -4667,6 +4727,7 @@ func (m *Model) startExtractJob(sourcePath, targetDir string) tea.Cmd {
 			BytesTotal:  0,
 			CurrentPath: sourcePath,
 		},
+		cancel:    cancel,
 		startedAt: time.Now(),
 	}
 	m.modal = modalState{kind: modalArchiveProgress}
@@ -4681,7 +4742,7 @@ func (m *Model) startExtractJob(sourcePath, targetDir string) tea.Cmd {
 						progress: p,
 					}
 				}
-				err := vfs.ExtractArchiveToDir(sourcePath, targetDir, emitProgress)
+				err := vfs.ExtractArchiveToDir(ctx, sourcePath, targetDir, emitProgress)
 				if err != nil {
 					if errors.Is(err, context.Canceled) {
 						err = context.Canceled
@@ -4698,6 +4759,88 @@ func (m *Model) startExtractJob(sourcePath, targetDir string) tea.Cmd {
 					jobID:       jobID,
 					sourcePaths: []string{sourcePath},
 					targetPath:  targetDir,
+				}
+			}()
+			return nil
+		},
+		waitArchiveProgressCmd(m.archiveProgress),
+	)
+}
+
+func (m *Model) startDeleteJob(kind fileOpKind, sources []string) tea.Cmd {
+	m.nextArchiveJob++
+	jobID := m.nextArchiveJob
+	ctx, cancel := context.WithCancel(context.Background())
+
+	m.archiveJob = &archiveJobState{
+		id:          jobID,
+		kind:        "delete",
+		sourcePaths: append([]string(nil), sources...),
+		targetPath:  "",
+		progress: vfs.CopyProgress{
+			FilesDone:   0,
+			FilesTotal:  len(sources),
+			BytesDone:   0,
+			BytesTotal:  0,
+			CurrentPath: sources[0],
+		},
+		cancel:    cancel,
+		startedAt: time.Now(),
+	}
+	m.modal = modalState{kind: modalArchiveProgress}
+	verb := "Moving to trash"
+	if kind == opPermanentDelete {
+		verb = "Deleting"
+	}
+	m.status = verb + " started"
+
+	return tea.Batch(
+		func() tea.Msg {
+			go func() {
+				verb := "move to trash"
+				if kind == opPermanentDelete {
+					verb = "delete permanently"
+				}
+				for i, sourcePath := range sources {
+					select {
+					case <-ctx.Done():
+						m.archiveProgress <- archiveDoneMsg{
+							jobID:       jobID,
+							sourcePaths: append([]string(nil), sources...),
+							err:         context.Canceled,
+						}
+						return
+					default:
+					}
+
+					var err error
+					if kind == opPermanentDelete {
+						err = vfs.DeletePath(sourcePath)
+					} else {
+						err = vfs.MoveToTrash(sourcePath)
+					}
+					if err != nil {
+						m.archiveProgress <- archiveDoneMsg{
+							jobID:       jobID,
+							sourcePaths: append([]string(nil), sources...),
+							err:         fmt.Errorf("%s %s: %w", verb, sourcePath, err),
+						}
+						return
+					}
+
+					m.archiveProgress <- archiveProgressMsg{
+						jobID: jobID,
+						progress: vfs.CopyProgress{
+							FilesDone:   i + 1,
+							FilesTotal:  len(sources),
+							CurrentPath: sourcePath,
+							Stage:       verb,
+						},
+					}
+				}
+				m.archiveProgress <- archiveDoneMsg{
+					jobID:       jobID,
+					sourcePaths: append([]string(nil), sources...),
 				}
 			}()
 			return nil
