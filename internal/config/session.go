@@ -17,8 +17,9 @@ type SessionState struct {
 
 // PaneSession stores per-pane session state (path and selected entry name).
 type PaneSession struct {
-	Path      string `toml:"path"`
-	EntryName string `toml:"entry_name"`
+	Path         string            `toml:"path"`
+	EntryName    string            `toml:"entry_name"`
+	CursorMemory map[string]string `toml:"cursor_memory"`
 }
 
 // DefaultSessionPath returns the path to the session file.

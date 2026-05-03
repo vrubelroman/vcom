@@ -1953,6 +1953,8 @@ func (m *Model) enterSelected() error {
 	pane.PushHistory(pane.Path)
 	log.Printf("[NAV] enterSelected — pane=%s from=%s to=%s", pane.ID, pane.Path, selected.Path)
 	pane.Path = selected.Path
+	pane.Cursor = 0
+	pane.Offset = 0
 	// Restore cursor position if we've visited this directory before in this session.
 	preserve := pane.LoadCursor(pane.Path)
 	if err := m.reloadPane(pane.ID, preserve); err != nil {
@@ -5251,22 +5253,41 @@ func selectedName(pane *BrowserPane) string {
 }
 
 func (m *Model) saveSession() {
+	leftMem := copyCursorMemory(m.left.cursorMemory)
+	rightMem := copyCursorMemory(m.right.cursorMemory)
+	// Always include current directory in cursor memory
+	if name := selectedName(&m.left); name != "" {
+		leftMem[m.left.Path] = name
+	}
+	if name := selectedName(&m.right); name != "" {
+		rightMem[m.right.Path] = name
+	}
 	s := config.SessionState{
 		ActivePane: string(m.active),
 		Left: config.PaneSession{
-			Path:      m.left.Path,
-			EntryName: selectedName(&m.left),
+			Path:         m.left.Path,
+			EntryName:    selectedName(&m.left),
+			CursorMemory: leftMem,
 		},
 		Right: config.PaneSession{
-			Path:      m.right.Path,
-			EntryName: selectedName(&m.right),
+			Path:         m.right.Path,
+			EntryName:    selectedName(&m.right),
+			CursorMemory: rightMem,
 		},
 	}
 	if err := config.SaveSession(s); err != nil {
 		log.Printf("[SESSION] save failed: %v", err)
 	} else {
-		log.Printf("[SESSION] saved: active=%s left=%s right=%s", m.active, m.left.Path, m.right.Path)
+		log.Printf("[SESSION] saved: active=%s left=%s right=%s cursorMem left=%d right=%d", m.active, m.left.Path, m.right.Path, len(leftMem), len(rightMem))
 	}
+}
+
+func copyCursorMemory(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 func applySession(m *Model) {
@@ -5304,9 +5325,19 @@ func applyPaneSession(pane *BrowserPane, ps config.PaneSession) {
 		return
 	}
 	pane.Path = abs
-	// Store entry name for cursor restore in reloadPane
+	// Restore per-directory cursor memory from previous session
+	if len(ps.CursorMemory) > 0 {
+		pane.cursorMemory = make(map[string]string, len(ps.CursorMemory))
+		for k, v := range ps.CursorMemory {
+			pane.cursorMemory[k] = v
+		}
+	}
+	// Ensure current directory's entry is also in cursor memory
 	if ps.EntryName != "" {
-		pane.cursorMemory = map[string]string{abs: ps.EntryName}
+		if pane.cursorMemory == nil {
+			pane.cursorMemory = make(map[string]string)
+		}
+		pane.cursorMemory[abs] = ps.EntryName
 	}
 }
 
