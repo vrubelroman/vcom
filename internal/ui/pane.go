@@ -69,7 +69,11 @@ func (p *BrowserPane) SetEntries(entries []vfs.Entry, preserveKey string) {
 		return
 	}
 	if preserveKey != "" {
+		oldCursor := p.Cursor
 		p.Cursor = vfs.FindSelected(entries, preserveKey)
+		if p.Cursor != oldCursor {
+			p.Offset = 0
+		}
 	}
 	if p.Cursor >= len(entries) {
 		p.Cursor = len(entries) - 1
