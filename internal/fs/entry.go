@@ -70,6 +70,7 @@ var (
 	archiveExtensions = map[string]struct{}{
 		"zip": {}, "tar": {}, "gz": {}, "tgz": {}, "xz": {}, "bz2": {}, "7z": {}, "rar": {},
 		"zst": {}, "lz": {}, "lz4": {}, "lzma": {},
+		"iso": {}, "img": {}, "dmg": {},
 	}
 )
 
