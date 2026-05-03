@@ -318,10 +318,15 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 		model.ssh = sshSt
 	}
 
-	if err := model.reloadPane(PaneLeft, ""); err != nil {
+	// Apply saved session (overrides startup paths if a previous session exists)
+	applySession(&model)
+
+	leftPreserve := model.left.LoadCursor(model.left.Path)
+	rightPreserve := model.right.LoadCursor(model.right.Path)
+	if err := model.reloadPane(PaneLeft, leftPreserve); err != nil {
 		return Model{}, err
 	}
-	if err := model.reloadPane(PaneRight, ""); err != nil {
+	if err := model.reloadPane(PaneRight, rightPreserve); err != nil {
 		return Model{}, err
 	}
 	return model, nil
@@ -1136,6 +1141,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			log.Printf("[KEY] Quit — exiting application")
+			m.saveSession()
 			m.cleanupArchiveMounts()
 			m.cleanupImageOverlay()
 			return m, tea.Quit
@@ -5242,6 +5248,66 @@ func selectedName(pane *BrowserPane) string {
 		return ""
 	}
 	return selected.Name
+}
+
+func (m *Model) saveSession() {
+	s := config.SessionState{
+		ActivePane: string(m.active),
+		Left: config.PaneSession{
+			Path:      m.left.Path,
+			EntryName: selectedName(&m.left),
+		},
+		Right: config.PaneSession{
+			Path:      m.right.Path,
+			EntryName: selectedName(&m.right),
+		},
+	}
+	if err := config.SaveSession(s); err != nil {
+		log.Printf("[SESSION] save failed: %v", err)
+	} else {
+		log.Printf("[SESSION] saved: active=%s left=%s right=%s", m.active, m.left.Path, m.right.Path)
+	}
+}
+
+func applySession(m *Model) {
+	s, err := config.LoadSession()
+	if err != nil {
+		log.Printf("[SESSION] load failed: %v", err)
+		return
+	}
+	if s.ActivePane == "" && s.Left.Path == "" && s.Right.Path == "" {
+		log.Printf("[SESSION] no previous session found")
+		return
+	}
+	log.Printf("[SESSION] loaded: active=%s left=%s right=%s", s.ActivePane, s.Left.Path, s.Right.Path)
+
+	applyPaneSession(&m.left, s.Left)
+	applyPaneSession(&m.right, s.Right)
+
+	if s.ActivePane == string(PaneRight) {
+		m.active = PaneRight
+	}
+}
+
+func applyPaneSession(pane *BrowserPane, ps config.PaneSession) {
+	if ps.Path == "" {
+		return
+	}
+	abs, err := filepath.Abs(ps.Path)
+	if err != nil {
+		log.Printf("[SESSION] skip pane path=%s: %v", ps.Path, err)
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		log.Printf("[SESSION] skip pane path=%s: not a directory or missing", abs)
+		return
+	}
+	pane.Path = abs
+	// Store entry name for cursor restore in reloadPane
+	if ps.EntryName != "" {
+		pane.cursorMemory = map[string]string{abs: ps.EntryName}
+	}
 }
 
 func metaSize(meta vfs.Metadata) string {
