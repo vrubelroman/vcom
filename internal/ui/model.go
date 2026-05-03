@@ -2325,6 +2325,9 @@ func (m *Model) handleDirSize() (tea.Model, tea.Cmd) {
 	log.Printf("[ACTION] DirSize: path=%s pane=%s", selected.Path, m.active)
 	m.busy = true
 	m.status = fmt.Sprintf("Calculating directory size for %s", selected.DisplayName())
+	if mount, ok := m.activePane().CurrentRemote(); ok {
+		return m, remoteDirSizeCmd(mount.Client, selected.Path)
+	}
 	return m, dirSizeCmd(selected.Path)
 }
 
@@ -4688,6 +4691,13 @@ func operationCmd(kind fileOpKind, sourcePath, targetDir string, overwrite bool)
 func dirSizeCmd(path string) tea.Cmd {
 	return func() tea.Msg {
 		size, err := vfs.DirectorySize(path)
+		return dirSizeMsg{path: path, size: size, err: err}
+	}
+}
+
+func remoteDirSizeCmd(client *remote.SSHClient, path string) tea.Cmd {
+	return func() tea.Msg {
+		size, err := client.DirectorySize(path)
 		return dirSizeMsg{path: path, size: size, err: err}
 	}
 }

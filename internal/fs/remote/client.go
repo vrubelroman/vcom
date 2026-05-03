@@ -574,6 +574,24 @@ func (c *SSHClient) walk(dirPath string, walkFn walkFunc, info os.FileInfo) erro
 // filepathSkipDir is used as a return value from Walk to skip a directory.
 var filepathSkipDir = fmt.Errorf("skip this directory")
 
+// DirectorySize recursively walks a remote directory and sums up file sizes.
+func (c *SSHClient) DirectorySize(dirPath string) (int64, error) {
+	var total int64
+	err := c.Walk(dirPath, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
 // SftpToFileInfo converts an os.FileInfo to a vfs-compatible file info.
 // This is used for consistent file information handling across local and remote.
 func SftpToFileInfo(name string, info os.FileInfo) (os.FileInfo, error) {
