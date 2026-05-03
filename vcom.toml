@@ -41,3 +41,5 @@ confirm_delete = true
 confirm_overwrite = true
 calculate_dir_size_on_space = true
 follow_symlinks = false
+auto_refresh = true
+auto_refresh_interval = 5
