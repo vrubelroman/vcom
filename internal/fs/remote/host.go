@@ -51,6 +51,12 @@ func (h SSHHost) Addr() string {
 	return h.HostName + ":" + h.Port
 }
 
+// SameAs returns true if two hosts point to the same server.
+func (h SSHHost) SameAs(other SSHHost) bool {
+	return h.HostName == other.HostName &&
+		(h.Port == other.Port || (h.Port == "" && other.Port == "22") || (h.Port == "22" && other.Port == ""))
+}
+
 // HostStore manages SSH hosts from both ~/.ssh/config and user-added hosts.
 type HostStore struct {
 	customHosts []SSHHost

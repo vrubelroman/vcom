@@ -1717,6 +1717,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.copyJob.background = true
 			m.modal = modalState{}
 			m.status = "Transfer continues in background"
+			log.Printf("[MODAL] CopyProgress — background requested (job=%d)", m.copyJob.id)
 			return m, nil
 		}
 		if key.Matches(msg, m.keys.ProgressCancel) {
@@ -1726,6 +1727,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			if m.copyJob.cancel != nil {
 				m.copyJob.cancel()
+				log.Printf("[MODAL] CopyProgress — cancel requested (job=%d)", m.copyJob.id)
 			}
 			m.status = strings.Title(operationVerb(m.copyJob.kind)) + " cancelling..."
 			return m, nil
@@ -4086,7 +4088,7 @@ func renderModalNoteLine(raw string, width int, palette theme.Palette, fallback 
 			keyStyle := lipgloss.NewStyle().
 				Width(keyWidth).
 				Background(palette.Panel).
-				Foreground(palette.FooterKey).
+				Foreground(palette.Accent).
 				Bold(true)
 			actionStyle := lipgloss.NewStyle().
 				Width(actionWidth).
@@ -4105,9 +4107,9 @@ func renderModalHintTokens(raw string, width int, palette theme.Palette, baseCol
 		color lipgloss.Color
 	}
 	tokens := []tokenStyle{
-		{token: "Background", color: palette.Info},
+		{token: "Background", color: palette.Accent},
 		{token: "Cancel", color: palette.CancelButton},
-		{token: "Enter", color: palette.ConfirmButton},
+		{token: "Enter", color: palette.Accent},
 		{token: "Esc", color: palette.CancelButton},
 	}
 	contains := false
@@ -4350,7 +4352,12 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 		}
 		lines = append(lines, barAndPct...)
 	}
-	lines = append(lines, spacer, renderModalNoteLine("Cancel / c", contentWidth, palette, mutedStyle))
+	bgStyle := lipgloss.NewStyle().Foreground(palette.Accent).Background(palette.Panel)
+	cancelStyle := lipgloss.NewStyle().Foreground(palette.CancelButton).Background(palette.Panel)
+	bgAndCancel := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(
+		bgStyle.Render("Background / b") + "  " + cancelStyle.Render("Cancel / c"),
+	)
+	lines = append(lines, spacer, bgAndCancel)
 	if job.background {
 		lines = append(lines, mutedStyle.Render("Transfer continues in background"))
 	}
@@ -4431,7 +4438,10 @@ func renderArchiveProgressModal(job archiveJobState, palette theme.Palette, widt
 
 	lines = append(lines,
 		spacer,
-		renderModalNoteLine("Background / b, Cancel / c", contentWidth, palette, mutedStyle),
+		lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(
+			lipgloss.NewStyle().Foreground(palette.Info).Background(palette.Panel).Render("Background / b")+"  "+
+				lipgloss.NewStyle().Foreground(palette.CancelButton).Background(palette.Panel).Render("Cancel / c"),
+		),
 	)
 	if job.background {
 		switch job.kind {
@@ -6284,7 +6294,7 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 
 	m.nextCopyJob++
 	jobID := m.nextCopyJob
-	_, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 
 	m.copyJob = &copyJobState{
 		id:          jobID,
@@ -6313,24 +6323,108 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 			go func() {
 				doneFiles := 0
 				var doneBytes int64
+				totalFiles := 0
 
-				for _, sourcePath := range sources {
+				log.Printf("[JOB] remoteCopy — goroutine started: job=%d kind=%d sources=%d srcRemote=%v dstRemote=%v",
+					jobID, kind, len(sources), sourceIsRemote, targetIsRemote)
+
+				// Phase 1: count files across all sources
+				sourceCounts := make([]int, len(sources))
+				for i, sourcePath := range sources {
+					if err := ctx.Err(); err != nil {
+						m.copyProgress <- copyDoneMsg{jobID: jobID, kind: kind, sourcePaths: sources, targetDir: targetDir, err: err}
+						return
+					}
+					var count int
+					if sourceIsRemote {
+						count = 1
+						info, err := srcClient.Lstat(sourcePath)
+						if err != nil {
+							log.Printf("[JOB] remoteCopy — Phase1 Lstat failed: job=%d path=%s err=%v", jobID, sourcePath, err)
+							m.copyProgress <- copyDoneMsg{jobID: jobID, kind: kind, sourcePaths: sources, targetDir: targetDir, err: err}
+							return
+						}
+						if info.IsDir() {
+							err := srcClient.Walk(sourcePath, func(_ string, info os.FileInfo, err error) error {
+								if err != nil { return err }
+								if !info.IsDir() { count++ }
+								return nil
+							})
+							if err != nil {
+								m.copyProgress <- copyDoneMsg{jobID: jobID, kind: kind, sourcePaths: sources, targetDir: targetDir, err: err}
+								return
+							}
+						}
+					} else {
+						entryStats, err := vfs.CopyStats(sourcePath)
+						if err != nil {
+							m.copyProgress <- copyDoneMsg{jobID: jobID, kind: kind, sourcePaths: sources, targetDir: targetDir, err: err}
+							return
+						}
+						count = entryStats.FilesTotal
+					}
+					sourceCounts[i] = count
+					totalFiles += count
+					m.copyProgress <- copyProgressMsg{
+						jobID: jobID,
+						progress: vfs.CopyProgress{
+							FilesDone:   0,
+							FilesTotal:  totalFiles,
+							CurrentPath: sourcePath,
+							Stage:       fmt.Sprintf("Counting files... %d found", totalFiles),
+						},
+					}
+				}
+
+				// Phase 2: transfer with known total
+				log.Printf("[JOB] remoteCopy — Phase2 start: job=%d totalFiles=%d", jobID, totalFiles)
+				for i, sourcePath := range sources {
+					if err := ctx.Err(); err != nil {
+						m.copyProgress <- copyDoneMsg{jobID: jobID, kind: kind, sourcePaths: sources, targetDir: targetDir, err: err}
+						return
+					}
 					baseName := filepath.Base(sourcePath)
 					targetPath := filepath.Join(targetDir, baseName)
+					log.Printf("[JOB] remoteCopy — Phase2 source[%d]: job=%d path=%s target=%s doneFiles=%d totalFiles=%d",
+						i, jobID, sourcePath, targetPath, doneFiles, totalFiles)
 					log.Printf("[JOB] remoteCopy — starting: job=%d source=%s target=%s", jobID, sourcePath, targetPath)
+
+					m.copyProgress <- copyProgressMsg{
+						jobID: jobID,
+						progress: vfs.CopyProgress{
+							FilesDone:   doneFiles,
+							FilesTotal:  totalFiles,
+							CurrentPath: sourcePath,
+							Stage:       "Transferring files...",
+						},
+					}
 
 					var info os.FileInfo
 					var err error
+					serverSide := false   // true if copy/move happened on server without streaming
+					trackedProgress := false // true if per-file progress callback was used
 
 					// Get file info and perform copy depending on direction.
 					switch {
 					case !sourceIsRemote && targetIsRemote:
 						// Local → Remote
+						log.Printf("[JOB] remoteCopy — direction: Local→Remote job=%d", jobID)
 						info, err = os.Stat(sourcePath)
 						if err == nil {
 							if info.IsDir() {
 								log.Printf("[JOB] remoteCopy — local→remote dir: job=%d source=%s target=%s", jobID, sourcePath, targetPath)
-								err = dstClient.CopyDirToRemote(sourcePath, targetPath)
+								err = dstClient.CopyDirToRemoteProgress(sourcePath, targetPath, func(path string, done, total int) {
+									trackedProgress = true
+									m.copyProgress <- copyProgressMsg{
+										jobID: jobID,
+										progress: vfs.CopyProgress{
+											FilesDone:   doneFiles + done,
+											FilesTotal:  totalFiles,
+											CurrentPath: path,
+											Stage:       "Copying files...",
+										},
+									}
+								}, ctx)
 							} else {
 								log.Printf("[JOB] remoteCopy — local→remote file: job=%d source=%s target=%s size=%d", jobID, sourcePath, targetPath, info.Size())
 								err = dstClient.CopyFileToRemote(sourcePath, targetPath)
@@ -6339,11 +6433,23 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 
 					case sourceIsRemote && !targetIsRemote:
 						// Remote → Local
+						log.Printf("[JOB] remoteCopy — direction: Remote→Local job=%d", jobID)
 						info, err = srcClient.Lstat(sourcePath)
 						if err == nil {
 							if info.IsDir() {
 								log.Printf("[JOB] remoteCopy — remote→local dir: job=%d source=%s target=%s", jobID, sourcePath, targetPath)
-								err = srcClient.CopyDirFromRemote(sourcePath, targetPath)
+								err = srcClient.CopyDirFromRemoteProgress(sourcePath, targetPath, func(path string, done, total int) {
+									trackedProgress = true
+									m.copyProgress <- copyProgressMsg{
+										jobID: jobID,
+										progress: vfs.CopyProgress{
+											FilesDone:   doneFiles + done,
+											FilesTotal:  totalFiles,
+											CurrentPath: path,
+											Stage:       "Copying files...",
+										},
+									}
+								}, ctx)
 							} else {
 								log.Printf("[JOB] remoteCopy — remote→local file: job=%d source=%s target=%s size=%d", jobID, sourcePath, targetPath, info.Size())
 								err = srcClient.CopyFileFromRemote(sourcePath, targetPath)
@@ -6351,14 +6457,80 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 						}
 
 					case sourceIsRemote && targetIsRemote:
-						// Remote → Remote (stream between two SFTP connections)
+						// Remote → Remote
+						log.Printf("[JOB] remoteCopy — direction: Remote→Remote job=%d sameHost=%v", jobID, srcClient.SameHostAs(dstClient))
 						info, err = srcClient.Lstat(sourcePath)
-						if err == nil {
+						if err != nil {
+							break
+						}
+
+						if srcClient.SameHostAs(dstClient) {
+							// Same host: use server-side commands, no local streaming
+							srcEscaped := "'" + sourcePath + "'"
+							dstEscaped := "'" + targetPath + "'"
+							if kind == opMove {
+								log.Printf("[JOB] remoteCopy — same-host move: job=%d src=%s dst=%s", jobID, sourcePath, targetPath)
+								_, err = srcClient.Exec("mv " + srcEscaped + " " + dstEscaped)
+								if err == nil {
+									serverSide = true
+								} else {
+									log.Printf("[JOB] remoteCopy — same-host mv failed, falling back: %v", err)
+								}
+							}
+							if !serverSide {
+								log.Printf("[JOB] remoteCopy — same-host copy: job=%d src=%s dst=%s", jobID, sourcePath, targetPath)
+								m.copyProgress <- copyProgressMsg{
+									jobID: jobID,
+									progress: vfs.CopyProgress{
+										FilesDone:   doneFiles,
+										FilesTotal:  totalFiles,
+										CurrentPath: sourcePath,
+										Stage:       "Running remote command...",
+									},
+								}
+								cmd := "cp -r"
+								if !info.IsDir() {
+									cmd = "cp"
+								}
+								err = srcClient.ExecWithProgress(cmd+" "+srcEscaped+" "+dstEscaped, func(line string) {
+									// cp -rv outputs one line per copied file
+									doneFiles++
+									log.Printf("[JOB] remoteCopy — same-host progress: job=%d doneFiles=%d line=%s", jobID, doneFiles, line)
+									m.copyProgress <- copyProgressMsg{
+										jobID: jobID,
+										progress: vfs.CopyProgress{
+											FilesDone:   doneFiles,
+											FilesTotal:  totalFiles,
+											CurrentPath: line,
+											Stage:       "Copying files...",
+										},
+									}
+								})
+								if err == nil {
+									serverSide = true
+								} else {
+									log.Printf("[JOB] remoteCopy — same-host cp failed, falling back: %v", err)
+								}
+							}
+						}
+
+						if !serverSide {
+							// Different hosts or same-host exec failed: stream through local
+							log.Printf("[JOB] remoteCopy — streaming through local: job=%d src=%s dst=%s", jobID, sourcePath, targetPath)
 							if info.IsDir() {
-								log.Printf("[JOB] remoteCopy — remote→remote dir: job=%d source=%s target=%s", jobID, sourcePath, targetPath)
-								err = remote.CopyDirBetweenRemotes(srcClient, dstClient, sourcePath, targetPath)
+								err = remote.CopyDirBetweenRemotesProgress(srcClient, dstClient, sourcePath, targetPath, func(path string, done, total int) {
+									trackedProgress = true
+									m.copyProgress <- copyProgressMsg{
+										jobID: jobID,
+										progress: vfs.CopyProgress{
+											FilesDone:   doneFiles + done,
+											FilesTotal:  totalFiles,
+											CurrentPath: path,
+											Stage:       "Copying files...",
+										},
+									}
+								}, ctx)
 							} else {
-								log.Printf("[JOB] remoteCopy — remote→remote file: job=%d source=%s target=%s size=%d", jobID, sourcePath, targetPath, info.Size())
 								err = remote.CopyFileBetweenRemotes(srcClient, dstClient, sourcePath, targetPath)
 							}
 						}
@@ -6375,7 +6547,8 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 					}
 
 					// For move operations, delete the source after copying
-					if kind == opMove {
+					// Skip if server-side move was used (source already moved)
+					if kind == opMove && !serverSide {
 						log.Printf("[JOB] remoteCopy — move, removing source: job=%d source=%s", jobID, sourcePath)
 						if !sourceIsRemote {
 							if err := os.RemoveAll(sourcePath); err != nil {
@@ -6400,7 +6573,13 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 						}
 					}
 
-					doneFiles++
+					log.Printf("[JOB] remoteCopy — source done: job=%d path=%s err=%v doneFiles=%d totalFiles=%d serverSide=%v",
+						jobID, sourcePath, err, doneFiles, totalFiles, serverSide)
+					if !serverSide || kind == opMove {
+						if !trackedProgress {
+							doneFiles += sourceCounts[i]
+						}
+					}
 					if info != nil && !info.IsDir() {
 						doneBytes += info.Size()
 					}
@@ -6410,11 +6589,11 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 						jobID: jobID,
 						progress: vfs.CopyProgress{
 							FilesDone:   doneFiles,
-							FilesTotal:  stats.FilesTotal,
+							FilesTotal:  totalFiles,
 							BytesDone:   doneBytes,
-							BytesTotal:  stats.BytesTotal,
+							BytesTotal:  0,
 							CurrentPath: sourcePath,
-							Stage:       "Transferring data",
+							Stage:       "Transferring files...",
 						},
 					}
 				}

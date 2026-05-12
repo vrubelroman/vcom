@@ -1,6 +1,8 @@
 package remote
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -310,6 +312,60 @@ func (c *SSHClient) IsConnected() bool {
 	return c.sftpCli != nil && c.sshConn != nil
 }
 
+// Exec runs a shell command on the remote server and returns combined output.
+func (c *SSHClient) Exec(cmd string) ([]byte, error) {
+	if c.sshConn == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+	session, err := c.sshConn.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("open session: %w", err)
+	}
+	defer session.Close()
+	return session.CombinedOutput(cmd)
+}
+
+// ExecWithProgress runs a shell command on the remote server and calls onLine
+// for each line of stdout output.
+func (c *SSHClient) ExecWithProgress(cmd string, onLine func(line string)) error {
+	if c.sshConn == nil {
+		return fmt.Errorf("not connected")
+	}
+	session, err := c.sshConn.NewSession()
+	if err != nil {
+		return fmt.Errorf("open session: %w", err)
+	}
+	defer session.Close()
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("start command: %w", err)
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		onLine(scanner.Text())
+	}
+
+	if scanErr := scanner.Err(); scanErr != nil {
+		return scanErr
+	}
+
+	return session.Wait()
+}
+
+// SameHostAs returns true if this client and other are connected to the same server.
+func (c *SSHClient) SameHostAs(other *SSHClient) bool {
+	if c == nil || other == nil {
+		return false
+	}
+	return c.Host.SameAs(other.Host)
+}
+
 // RemoveRecursive recursively deletes a remote file or directory.
 // For directories, it walks and removes all children first.
 func (c *SSHClient) RemoveRecursive(path string) error {
@@ -431,37 +487,79 @@ func (c *SSHClient) CopyFileFromRemote(remotePath, localPath string) error {
 
 // CopyDirToRemote recursively copies a local directory to a remote path.
 func (c *SSHClient) CopyDirToRemote(localDir, remoteDir string) error {
+	return c.copyDirToRemote(localDir, remoteDir, nil, nil)
+}
+
+// CopyDirToRemoteProgress is like CopyDirToRemote but calls onFile after each copy.
+func (c *SSHClient) CopyDirToRemoteProgress(localDir, remoteDir string, onFile func(path string, done, total int), ctx context.Context) error {
+	return c.copyDirToRemote(localDir, remoteDir, onFile, ctx)
+}
+
+func (c *SSHClient) copyDirToRemote(localDir, remoteDir string, onFile func(path string, done, total int), ctx context.Context) error {
+	done := 0
 	return filepath.Walk(localDir, func(localPath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
 		relPath, _ := filepath.Rel(localDir, localPath)
 		remotePath := path.Join(remoteDir, relPath)
-
 		if info.IsDir() {
 			return c.MkdirAll(remotePath)
 		}
-
-		return c.CopyFileToRemote(localPath, remotePath)
+		if err := c.CopyFileToRemote(localPath, remotePath); err != nil {
+			return err
+		}
+		done++
+		if onFile != nil {
+			onFile(remotePath, done, 0)
+		}
+		return nil
 	})
 }
 
 // CopyDirFromRemote recursively copies a remote directory to a local path.
 func (c *SSHClient) CopyDirFromRemote(remoteDir, localDir string) error {
+	return c.copyDirFromRemote(remoteDir, localDir, nil, nil)
+}
+
+// CopyDirFromRemoteProgress is like CopyDirFromRemote but calls onFile after each copy.
+func (c *SSHClient) CopyDirFromRemoteProgress(remoteDir, localDir string, onFile func(path string, done, total int), ctx context.Context) error {
+	return c.copyDirFromRemote(remoteDir, localDir, onFile, ctx)
+}
+
+func (c *SSHClient) copyDirFromRemote(remoteDir, localDir string, onFile func(path string, done, total int), ctx context.Context) error {
+	done := 0
 	return c.Walk(remoteDir, func(remotePath string, info os.FileInfo, err error) error {
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
 		if err != nil {
 			return err
 		}
-
 		relPath, _ := filepath.Rel(remoteDir, remotePath)
 		localPath := filepath.Join(localDir, relPath)
-
 		if info.IsDir() {
 			return os.MkdirAll(localPath, 0o755)
 		}
-
-		return c.CopyFileFromRemote(remotePath, localPath)
+		if err := c.CopyFileFromRemote(remotePath, localPath); err != nil {
+			return err
+		}
+		done++
+		if onFile != nil {
+			onFile(localPath, done, 0)
+		}
+		return nil
 	})
 }
 
@@ -503,23 +601,42 @@ func CopyFileBetweenRemotes(srcClient, dstClient *SSHClient, srcPath, dstPath st
 }
 
 // CopyDirBetweenRemotes recursively copies a directory from one remote host to another.
-// Directories are created on the destination first, then all files are streamed through
-// the local machine.
 func CopyDirBetweenRemotes(srcClient, dstClient *SSHClient, srcDir, dstDir string) error {
+	return copyDirBetweenRemotes(srcClient, dstClient, srcDir, dstDir, nil, nil)
+}
+
+func copyDirBetweenRemotes(srcClient, dstClient *SSHClient, srcDir, dstDir string, onFile func(path string, done, total int), ctx context.Context) error {
+	done := 0
 	return srcClient.Walk(srcDir, func(remotePath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
 		relPath, _ := filepath.Rel(srcDir, remotePath)
 		dstPath := path.Join(dstDir, relPath)
-
 		if info.IsDir() {
 			return dstClient.MkdirAll(dstPath)
 		}
-
-		return CopyFileBetweenRemotes(srcClient, dstClient, remotePath, dstPath)
+		if err := CopyFileBetweenRemotes(srcClient, dstClient, remotePath, dstPath); err != nil {
+			return err
+		}
+		done++
+		if onFile != nil {
+			onFile(remotePath, done, 0)
+		}
+		return nil
 	})
+}
+
+// CopyDirBetweenRemotesProgress is like CopyDirBetweenRemotes with progress and context support.
+func CopyDirBetweenRemotesProgress(srcClient, dstClient *SSHClient, srcDir, dstDir string, onFile func(path string, done, total int), ctx context.Context) error {
+	return copyDirBetweenRemotes(srcClient, dstClient, srcDir, dstDir, onFile, ctx)
 }
 
 // Walk walks the remote filesystem tree rooted at root, calling walkFn for each file/dir.
