@@ -4352,12 +4352,7 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 		}
 		lines = append(lines, barAndPct...)
 	}
-	bgStyle := lipgloss.NewStyle().Foreground(palette.Accent).Background(palette.Panel)
-	cancelStyle := lipgloss.NewStyle().Foreground(palette.CancelButton).Background(palette.Panel)
-	bgAndCancel := lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(
-		bgStyle.Render("Background / b") + "  " + cancelStyle.Render("Cancel / c"),
-	)
-	lines = append(lines, spacer, bgAndCancel)
+	lines = append(lines, spacer, renderModalNoteLine("Background / b, Cancel / c", contentWidth, palette, mutedStyle))
 	if job.background {
 		lines = append(lines, mutedStyle.Render("Transfer continues in background"))
 	}
@@ -4436,13 +4431,7 @@ func renderArchiveProgressModal(job archiveJobState, palette theme.Palette, widt
 		)
 	}
 
-	lines = append(lines,
-		spacer,
-		lipgloss.NewStyle().Width(contentWidth).Background(palette.Panel).Render(
-			lipgloss.NewStyle().Foreground(palette.Info).Background(palette.Panel).Render("Background / b")+"  "+
-				lipgloss.NewStyle().Foreground(palette.CancelButton).Background(palette.Panel).Render("Cancel / c"),
-		),
-	)
+	lines = append(lines, spacer, renderModalNoteLine("Background / b, Cancel / c", contentWidth, palette, mutedStyle))
 	if job.background {
 		switch job.kind {
 		case "extract":
