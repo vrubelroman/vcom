@@ -33,6 +33,16 @@ type copyProgressState struct {
 	stats     TransferStats
 	callback  func(CopyProgress)
 	lastEmit  time.Time
+	stage     string
+	discover  bool // if true, count files during copy for progress total
+}
+
+func (s *copyProgressState) discoverFiles(count int, dirPath string) {
+	if count == 0 {
+		return
+	}
+	s.stats.FilesTotal += count
+	s.emit(dirPath, false)
 }
 
 func CopyPath(srcPath string, dstDir string, overwrite bool) (string, error) {
@@ -73,15 +83,15 @@ func CopyPathWithProgressContext(ctx context.Context, srcPath string, dstDir str
 	if progress == nil {
 		progress = func(CopyProgress) {}
 	}
-	if stats.FilesTotal == 0 && stats.BytesTotal == 0 {
-		resolved, err := CopyStats(srcPath)
-		if err != nil {
-			return "", err
-		}
-		stats = resolved
+	tracker := copyProgressState{
+		ctx:     ctx,
+		stats:   stats,
+		callback: progress,
+		stage:   "Scanning files...",
+		discover: stats.FilesTotal == 0,
 	}
-	tracker := copyProgressState{ctx: ctx, stats: stats, callback: progress}
 	tracker.emit(srcPath, true)
+	tracker.stage = "Copying files..."
 
 	cleanupOnErr := func(copyErr error) (string, error) {
 		if copyErr != nil {
@@ -144,16 +154,7 @@ func CopyStats(srcPath string) (TransferStats, error) {
 		if d.IsDir() {
 			return nil
 		}
-
-		info, err := os.Lstat(current)
-		if err != nil {
-			return err
-		}
-
 		stats.FilesTotal++
-		if info.Mode()&os.ModeSymlink == 0 {
-			stats.BytesTotal += info.Size()
-		}
 		return nil
 	})
 	if err != nil {
@@ -204,14 +205,6 @@ func MovePathWithProgressContext(ctx context.Context, srcPath string, dstDir str
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if stats.FilesTotal == 0 && stats.BytesTotal == 0 {
-		resolved, err := CopyStats(srcPath)
-		if err != nil {
-			return "", err
-		}
-		stats = resolved
-	}
-
 	if err := os.Rename(srcPath, targetPath); err == nil {
 		progress(CopyProgress{
 			FilesDone:   stats.FilesTotal,
@@ -373,6 +366,17 @@ func copyDir(srcDir string, dstDir string, tracker *copyProgressState) error {
 		return err
 	}
 
+	// Count files in this directory so progress total converges
+	if tracker != nil && tracker.discover {
+		fileCount := 0
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				fileCount++
+			}
+		}
+		tracker.discoverFiles(fileCount, srcDir)
+	}
+
 	for _, entry := range entries {
 		if tracker != nil && tracker.ctx != nil {
 			if err := tracker.ctx.Err(); err != nil {
@@ -496,13 +500,17 @@ func (s *copyProgressState) emit(currentPath string, force bool) {
 		return
 	}
 	s.lastEmit = time.Now()
+	stage := s.stage
+	if stage == "" {
+		stage = "Transferring data"
+	}
 	s.callback(CopyProgress{
 		FilesDone:   s.filesDone,
 		FilesTotal:  s.stats.FilesTotal,
 		BytesDone:   s.bytesDone,
 		BytesTotal:  s.stats.BytesTotal,
 		CurrentPath: currentPath,
-		Stage:       "Transferring data",
+		Stage:       stage,
 	})
 }
 

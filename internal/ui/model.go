@@ -2355,22 +2355,7 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 	log.Printf("[ACTION] Transfer: kind=%d active=%s srcPath=%s dstPath=%s srcRemote=%v dstRemote=%v sources=%v",
 		kind, m.active, srcPane.Path, dstPane.Path, srcHasRemote, dstHasRemote, sources)
 
-	// Remote-involved transfer (Local↔Remote or Remote→Remote)
-	if srcHasRemote || dstHasRemote {
-		if m.copyJob != nil {
-			log.Printf("[SKIP] Transfer: already running (remote)")
-			m.status = "Transfer is already running"
-			return m, nil
-		}
-
-		log.Printf("[ACTION] Transfer: remote copyPlan — targetDir=%s", targetDir)
-		m.busy = true
-		m.status = fmt.Sprintf("Calculating %s size", operationVerb(kind))
-		return m, m.remoteCopyPlanCmd(kind, sources, targetDir,
-			srcHasRemote, dstHasRemote, srcRemote.Client, dstRemote.Client)
-	}
-
-	// Local-only transfer (existing logic)
+	// Check for existing targets (fast — one Stat per top-level item)
 	existingTargets := 0
 	for _, sourcePath := range sources {
 		targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
@@ -2384,23 +2369,45 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 			existingTargets++
 		}
 	}
-
-	if kind == opCopy || kind == opMove {
-		if m.copyJob != nil {
-			log.Printf("[SKIP] Transfer: already running (local)")
-			m.status = "Transfer is already running"
-			return m, nil
-		}
-
-		overwrite := existingTargets > 0
-		if existingTargets > 0 && !m.cfg.Behavior.ConfirmOverwrite {
-			overwrite = true
-		}
-		log.Printf("[ACTION] Transfer: local copyPlan — targetDir=%s existingTargets=%d overwrite=%v", targetDir, existingTargets, overwrite)
-		m.busy = true
-		m.status = fmt.Sprintf("Calculating %s size", operationVerb(kind))
-		return m, copyPlanCmd(kind, sources, targetDir, overwrite, existingTargets)
+	overwrite := existingTargets > 0
+	if existingTargets > 0 && !m.cfg.Behavior.ConfirmOverwrite {
+		overwrite = true
 	}
+
+	// Show confirm dialog immediately (no plan — skip walking & counting files)
+	verb := strings.Title(operationVerb(kind))
+	title := fmt.Sprintf("%s selected entry?", verb)
+	if srcHasRemote || dstHasRemote {
+		title = fmt.Sprintf("%s selected entry via SFTP?", verb)
+	}
+	bodyLines := []string{
+		fmt.Sprintf("Items: %d", len(sources)),
+		fmt.Sprintf("Source: %s", srcPane.Path),
+		fmt.Sprintf("Target: %s", targetDir),
+	}
+	if existingTargets > 0 {
+		bodyLines = append(bodyLines, fmt.Sprintf("Overwrite: %d existing target(s)", existingTargets))
+	}
+	if srcHasRemote || dstHasRemote {
+		bodyLines = append(bodyLines, "")
+		if srcHasRemote {
+			hostName := srcRemote.Host.Name
+			bodyLines = append(bodyLines, fmt.Sprintf("Source host: %s", hostName))
+		}
+		if dstHasRemote {
+			hostName := dstRemote.Host.Name
+			bodyLines = append(bodyLines, fmt.Sprintf("Target host: %s", hostName))
+		}
+	}
+	m.openConfirmModal(title, strings.Join(bodyLines, "\n"), "confirm-actions", pendingOperation{
+		kind:            kind,
+		sourcePaths:     append([]string(nil), sources...),
+		targetDir:       targetDir,
+		overwrite:       overwrite,
+		existingTargets: existingTargets,
+		srcClient:       srcRemote.Client,
+		dstClient:       dstRemote.Client,
+	})
 	return m, nil
 }
 
@@ -2444,35 +2451,34 @@ func (m *Model) handleDelete() (tea.Model, tea.Cmd) {
 	}
 
 	log.Printf("[ACTION] Delete: sources=%v remote=%v", sources, m.activePane().InRemote())
+	m.busy = false
 
 	// Remote delete via SFTP (no trash on remote — always permanent)
 	if mount, ok := m.activePane().CurrentRemote(); ok {
 		log.Printf("[ACTION] Delete: remote — sources=%v", sources)
-		m.busy = true
-		m.status = "Calculating delete size"
-		return m, m.remoteDeletePlanCmd(sources, mount.Client)
+		title := "Delete selected entr" + pluralSuffix(len(sources), "y", "ies") + " from remote?"
+		body := fmt.Sprintf("Items: %d", len(sources))
+		note := "Enter / y to confirm, Esc / n to cancel"
+		m.openConfirmModal(title, body, note, pendingOperation{
+			kind:        opDelete,
+			sourcePaths: append([]string(nil), sources...),
+			srcClient:   mount.Client,
+		})
+		return m, nil
 	}
 
 	// Default to permanent delete
 	m.deleteKind = "permanent"
 
-	if !m.cfg.Behavior.ConfirmDelete {
-		// No plan needed — show a simple confirm dialog with mode toggle
-		title := "Permanently delete selected entr" + pluralSuffix(len(sources), "y", "ies") + "?"
-		body := fmt.Sprintf("Items: %d", len(sources))
-		note := fmt.Sprintf("Mode: %s  (D/d to change)\nEnter / y to confirm, Esc / n to cancel", m.deleteKind)
-		pending := pendingOperation{
-			kind:        opPermanentDelete,
-			sourcePaths: append([]string(nil), sources...),
-		}
-		m.openConfirmModal(title, body, note, pending)
-		return m, nil
-	}
-
-	// Compute plan first, then show confirm modal with mode toggle
-	m.busy = true
-	m.status = "Calculating delete size"
-	return m, trashPlanCmd(sources)
+	// Show confirm dialog with mode toggle (no plan — skip counting files)
+	title := "Permanently delete selected entr" + pluralSuffix(len(sources), "y", "ies") + "?"
+	body := fmt.Sprintf("Items: %d", len(sources))
+	note := fmt.Sprintf("Mode: %s  (D/d to change)\nEnter / y to confirm, Esc / n to cancel", m.deleteKind)
+	m.openConfirmModal(title, body, note, pendingOperation{
+		kind:        opDelete,
+		sourcePaths: append([]string(nil), sources...),
+	})
+	return m, nil
 }
 
 func (m *Model) handleUnpack() (tea.Model, tea.Cmd) {
@@ -4318,26 +4324,33 @@ func renderCopyProgressModal(job copyJobState, palette theme.Palette, width int)
 		BorderBackground(palette.Panel)
 
 	progress := job.progress
+	filesLabel := fmt.Sprintf("%d / ?", progress.FilesDone)
+	if progress.FilesTotal > 0 {
+		filesLabel = fmt.Sprintf("%d / %d", progress.FilesDone, progress.FilesTotal)
+	}
+
 	ratio := 0.0
-	if progress.BytesTotal > 0 {
-		ratio = float64(progress.BytesDone) / float64(progress.BytesTotal)
+	if progress.FilesTotal > 0 {
+		ratio = float64(progress.FilesDone) / float64(progress.FilesTotal)
 	}
 
 	lines := []string{
 		titleStyle.Render(progressTitle(job.kind)),
 		spacer,
-		renderProgressBarLine(ratio, contentWidth, palette),
-		spacer,
-		renderProgressPercentLine(ratio, contentWidth, palette),
 		renderProgressStatLine("Stage:", progressStageLabel(progress, job.kind), contentWidth, palette),
 		renderProgressStatLine("Target:", job.targetDir, contentWidth, palette),
 		spacer,
-		renderProgressStatLine("Files:", fmt.Sprintf("%d / %d", progress.FilesDone, progress.FilesTotal), contentWidth, palette),
-		renderProgressStatLine("Size:", fmt.Sprintf("%s / %s", formatSize(progress.BytesDone, true), formatSize(progress.BytesTotal, true)), contentWidth, palette),
-		renderProgressStatLine("Speed:", transferSpeed(progress.BytesDone, job.startedAt), contentWidth, palette),
-		spacer,
-		renderModalNoteLine("Background / b, Cancel / c", contentWidth, palette, mutedStyle),
+		renderProgressStatLine("Files:", filesLabel, contentWidth, palette),
 	}
+	if progress.FilesTotal > 0 {
+		barAndPct := []string{
+			spacer,
+			renderProgressBarLine(ratio, contentWidth, palette),
+			renderProgressPercentLine(ratio, contentWidth, palette),
+		}
+		lines = append(lines, barAndPct...)
+	}
+	lines = append(lines, spacer, renderModalNoteLine("Cancel / c", contentWidth, palette, mutedStyle))
 	if job.background {
 		lines = append(lines, mutedStyle.Render("Transfer continues in background"))
 	}
@@ -4932,6 +4945,7 @@ func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir st
 			BytesDone:   0,
 			BytesTotal:  stats.BytesTotal,
 			CurrentPath: sourcePaths[0],
+			Stage:       "Counting files...",
 		},
 		cancel:    cancel,
 		startedAt: time.Now(),
@@ -4942,30 +4956,50 @@ func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir st
 	return tea.Batch(
 		func() tea.Msg {
 			go func() {
+				var statErr error
 				doneFiles := 0
-				var doneBytes int64
-				for _, sourcePath := range sourcePaths {
-					entryStats, statErr := vfs.CopyStats(sourcePath)
-					if statErr != nil {
+				totalFiles := 0
+
+				// Phase 1: count files across all sources
+				entriesStats := make([]vfs.TransferStats, len(sourcePaths))
+				for i, sourcePath := range sourcePaths {
+					entryStats, err := vfs.CopyStats(sourcePath)
+					if err != nil {
 						m.copyProgress <- copyDoneMsg{
 							jobID:       jobID,
 							kind:        kind,
 							sourcePaths: append([]string(nil), sourcePaths...),
 							targetDir:   targetDir,
-							err:         statErr,
+							err:         err,
 						}
 						return
 					}
+					entriesStats[i] = entryStats
+					totalFiles += entryStats.FilesTotal
+					m.copyProgress <- copyProgressMsg{
+						jobID: jobID,
+						progress: vfs.CopyProgress{
+							FilesDone:   0,
+							FilesTotal:  totalFiles,
+							CurrentPath: sourcePath,
+							Stage:       fmt.Sprintf("Counting files... %d found", totalFiles),
+						},
+					}
+				}
+
+				// Phase 2: copy with known total
+				for i, sourcePath := range sourcePaths {
+					entryStats := entriesStats[i]
 					progressFn := func(progress vfs.CopyProgress) {
 						m.copyProgress <- copyProgressMsg{
 							jobID: jobID,
 							progress: vfs.CopyProgress{
 								FilesDone:   doneFiles + progress.FilesDone,
-								FilesTotal:  stats.FilesTotal,
-								BytesDone:   doneBytes + progress.BytesDone,
-								BytesTotal:  stats.BytesTotal,
+								FilesTotal:  totalFiles,
+								BytesDone:   0,
+								BytesTotal:  0,
 								CurrentPath: progress.CurrentPath,
-								Stage:       progress.Stage,
+								Stage:       "Copying files...",
 							},
 						}
 					}
@@ -4986,7 +5020,6 @@ func (m *Model) startCopyJob(kind fileOpKind, sourcePaths []string, targetDir st
 						return
 					}
 					doneFiles += entryStats.FilesTotal
-					doneBytes += entryStats.BytesTotal
 				}
 				m.copyProgress <- copyDoneMsg{
 					jobID:       jobID,
@@ -5440,13 +5473,14 @@ func formatSize(size int64, human bool) string {
 }
 
 func formatCopyStatus(kind fileOpKind, progress vfs.CopyProgress) string {
+	filesLabel := fmt.Sprintf("%d/?", progress.FilesDone)
+	if progress.FilesTotal > 0 {
+		filesLabel = fmt.Sprintf("%d/%d", progress.FilesDone, progress.FilesTotal)
+	}
 	return fmt.Sprintf(
-		"%s in background: %d/%d files, %s/%s",
+		"%s in background: %s files",
 		strings.Title(operationVerb(kind)),
-		progress.FilesDone,
-		progress.FilesTotal,
-		formatSize(progress.BytesDone, true),
-		formatSize(progress.BytesTotal, true),
+		filesLabel,
 	)
 }
 
@@ -6263,6 +6297,7 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 			BytesDone:   0,
 			BytesTotal:  stats.BytesTotal,
 			CurrentPath: sources[0],
+			Stage:       "Counting files...",
 		},
 		cancel:    cancel,
 		startedAt: time.Now(),
