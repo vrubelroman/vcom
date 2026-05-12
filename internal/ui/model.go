@@ -271,16 +271,16 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 		return Model{}, err
 	}
 
-	cwd, err := os.Getwd()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return Model{}, err
+		return Model{}, fmt.Errorf("resolve home dir: %w", err)
 	}
 
-	leftPath, err := resolveStartPath(cfg.Startup.LeftPath, cwd)
+	leftPath, err := resolveStartPath(cfg.Startup.LeftPath, home)
 	if err != nil {
 		return Model{}, err
 	}
-	rightPath, err := resolveStartPath(cfg.Startup.RightPath, cwd)
+	rightPath, err := resolveStartPath(cfg.Startup.RightPath, home)
 	if err != nil {
 		return Model{}, err
 	}
@@ -5304,6 +5304,18 @@ func selectedName(pane *BrowserPane) string {
 func (m *Model) saveSession() {
 	leftMem := copyCursorMemory(m.left.cursorMemory)
 	rightMem := copyCursorMemory(m.right.cursorMemory)
+
+	leftPath := m.left.Path
+	if m.left.InRemote() {
+		leftPath = ""
+		log.Printf("[SESSION] pane left is in remote mode, clearing saved path")
+	}
+	rightPath := m.right.Path
+	if m.right.InRemote() {
+		rightPath = ""
+		log.Printf("[SESSION] pane right is in remote mode, clearing saved path")
+	}
+
 	// Always include current directory in cursor memory
 	if name := selectedName(&m.left); name != "" {
 		leftMem[m.left.Path] = name
@@ -5314,12 +5326,12 @@ func (m *Model) saveSession() {
 	s := config.SessionState{
 		ActivePane: string(m.active),
 		Left: config.PaneSession{
-			Path:         m.left.Path,
+			Path:         leftPath,
 			EntryName:    selectedName(&m.left),
 			CursorMemory: leftMem,
 		},
 		Right: config.PaneSession{
-			Path:         m.right.Path,
+			Path:         rightPath,
 			EntryName:    selectedName(&m.right),
 			CursorMemory: rightMem,
 		},
@@ -5327,7 +5339,8 @@ func (m *Model) saveSession() {
 	if err := config.SaveSession(s); err != nil {
 		log.Printf("[SESSION] save failed: %v", err)
 	} else {
-		log.Printf("[SESSION] saved: active=%s left=%s right=%s cursorMem left=%d right=%d", m.active, m.left.Path, m.right.Path, len(leftMem), len(rightMem))
+		log.Printf("[SESSION] saved: active=%s left=%s right=%s cursorMem left=%d right=%d",
+			m.active, m.left.Path, m.right.Path, len(leftMem), len(rightMem))
 	}
 }
 
@@ -5368,9 +5381,8 @@ func applyPaneSession(pane *BrowserPane, ps config.PaneSession) {
 		log.Printf("[SESSION] skip pane path=%s: %v", ps.Path, err)
 		return
 	}
-	info, err := os.Stat(abs)
-	if err != nil || !info.IsDir() {
-		log.Printf("[SESSION] skip pane path=%s: not a directory or missing", abs)
+	if err := canReadDir(abs); err != nil {
+		log.Printf("[SESSION] skip pane path=%s: %v", abs, err)
 		return
 	}
 	pane.Path = abs
@@ -5388,6 +5400,22 @@ func applyPaneSession(pane *BrowserPane, ps config.PaneSession) {
 		}
 		pane.cursorMemory[abs] = ps.EntryName
 	}
+}
+
+func canReadDir(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", path)
+	}
+	return nil
 }
 
 func metaSize(meta vfs.Metadata) string {
