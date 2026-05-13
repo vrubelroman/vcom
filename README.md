@@ -52,8 +52,8 @@ The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works
 Download and install the latest release:
 
 ```bash
-curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.5/vcom_0.2.4_amd64.deb -o /tmp/vcom_0.2.4_amd64.deb
-sudo apt install /tmp/vcom_0.2.4_amd64.deb
+curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.5/vcom_0.2.5_amd64.deb -o /tmp/vcom_0.2.5_amd64.deb
+sudo apt install /tmp/vcom_0.2.5_amd64.deb
 ```
 
 The Debian package declares `ueberzug` (or `ueberzugpp` where available) as a dependency for image preview outside `kitty`.
@@ -194,7 +194,7 @@ Pushing a tag like `v0.2.5` triggers GitHub Actions release workflow (`.github/w
 Release artifacts:
 
 - `vcom-v0.2.5-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_0.2.4_amd64.deb`
+- `vcom_0.2.5_amd64.deb`
 - `vcom-v0.2.5-checksums.txt`
 
 ## Notes
