@@ -1755,16 +1755,26 @@ func (m *Model) reloadPane(id PaneID, preserve string) error {
 }
 
 func (m *Model) refreshAllPanes(status string) (tea.Model, tea.Cmd) {
-	leftSelected := selectedName(&m.left)
-	rightSelected := selectedName(&m.right)
-	log.Printf("[PANEL] refreshAllPanes: left=%s right=%s", leftSelected, rightSelected)
-	if err := m.reloadPane(PaneLeft, leftSelected); err != nil {
-		m.status = err.Error()
-		return m, nil
-	}
-	if err := m.reloadPane(PaneRight, rightSelected); err != nil {
-		m.status = err.Error()
-		return m, nil
+	log.Printf("[PANEL] refreshAllPanes")
+	for _, id := range []PaneID{PaneLeft, PaneRight} {
+		pane := m.paneByID(id)
+		if name := selectedName(pane); name != "" {
+			pane.SaveCursor(pane.Path, name)
+		}
+		preserve := pane.LoadCursor(pane.Path)
+		var err error
+		if pane.InRemote() {
+			err = m.reloadRemotePane(id, preserve)
+		} else if pane.InArchive() {
+			err = m.reloadPane(id, preserve)
+		} else {
+			err = m.reloadPane(id, preserve)
+		}
+		if err != nil {
+			log.Printf("[REFRESH] pane=%s path=%s err=%v", id, pane.Path, err)
+			m.status = err.Error()
+			return m, nil
+		}
 	}
 	m.status = status
 	return m, m.loadPreviewCmd()
