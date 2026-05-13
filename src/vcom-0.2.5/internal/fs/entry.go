@@ -1,0 +1,156 @@
+package vfs
+
+import (
+	"io/fs"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+var (
+	configExtensions = map[string]struct{}{
+		"toml": {}, "yaml": {}, "yml": {}, "json": {}, "jsonc": {}, "ini": {}, "conf": {},
+		"config": {}, "env": {}, "properties": {}, "xml": {}, "mod": {}, "sum": {}, "lock": {},
+	}
+	textExtensions = map[string]struct{}{
+		"txt": {}, "md": {}, "rst": {}, "go": {}, "rs": {}, "c": {}, "h": {}, "cpp": {}, "hpp": {},
+		"py": {}, "js": {}, "ts": {}, "tsx": {}, "jsx": {}, "java": {}, "kt": {}, "kts": {}, "swift": {},
+		"html": {}, "css": {}, "scss": {}, "sass": {}, "less": {}, "styl": {},
+		"sh": {}, "bash": {}, "zsh": {}, "fish": {}, "sql": {},
+		"log": {}, "csv": {}, "tsv": {},
+		"lua": {}, "rb": {}, "pl": {}, "pm": {}, "t": {}, "ps1": {}, "bat": {}, "cmd": {},
+		"vue": {}, "svelte": {}, "astro": {}, "ejs": {}, "hbs": {}, "pug": {}, "haml": {}, "php": {}, "twig": {},
+		"scala": {}, "groovy": {}, "clj": {}, "ex": {}, "exs": {}, "elm": {}, "hs": {}, "lisp": {}, "cl": {}, "rkt": {}, "scm": {}, "dart": {},
+		"tex": {}, "bib": {}, "sty": {}, "cls": {},
+		"gradle": {}, "cmake": {}, "mk": {}, "mak": {},
+		"asm": {}, "s": {}, "inc": {},
+		"patch": {}, "diff": {},
+		"proto": {}, "graphql": {}, "gql": {},
+		"tf": {}, "hcl": {},
+		"r": {}, "m": {}, "mm": {},
+		"nim": {}, "zig": {}, "odin": {}, "v": {}, "nix": {},
+		"cr": {}, "jl": {},
+		"erl": {}, "hrl": {},
+	}
+	// textFilenames lists common text files without a meaningful extension
+	// (like Makefile, Dockerfile, etc.) so they open in the editor.
+	textFilenames = map[string]struct{}{
+		"makefile": {}, "dockerfile": {}, "containerfile": {},
+		"readme": {}, "license": {}, "licence": {}, "copying": {}, "changelog": {}, "changes": {},
+		"todo": {}, "notes": {}, "authors": {}, "contributors": {}, "maintainers": {},
+		"procfile": {}, "gemfile": {}, "rakefile": {}, "snapfile": {}, "fastfile": {},
+		"cmakelists": {}, "justfile": {}, "taskfile": {},
+		"gitignore": {}, "gitattributes": {}, "gitmodules": {}, "gitkeep": {},
+		"gitconfig": {}, "git-blame-ignore-revs": {},
+		"editorconfig": {}, "envrc": {}, "hushlogin": {},
+		"xsession": {}, "xresources": {}, "xinitrc": {},
+		"bashrc": {}, "bash_profile": {}, "bash_logout": {},
+		"zshrc": {}, "zprofile": {}, "zlogin": {}, "zlogout": {},
+		"profile": {}, "inputrc": {}, "tmux.conf": {},
+		"npmrc": {}, "yarnrc": {}, "pnpmrc": {},
+		"eslintrc": {}, "prettierrc": {}, "babelrc": {},
+		"stylelintrc": {}, "commitlintrc": {},
+		"htaccess": {}, "htpasswd": {},
+	}
+	imageExtensions = map[string]struct{}{
+		"png": {}, "jpg": {}, "jpeg": {}, "gif": {}, "webp": {}, "bmp": {}, "svg": {}, "ico": {},
+		"avif": {}, "heic": {}, "heif": {}, "tiff": {}, "tif": {},
+	}
+	pdfExtensions = map[string]struct{}{
+		"pdf": {},
+	}
+	audioExtensions = map[string]struct{}{
+		"mp3": {}, "flac": {}, "ogg": {}, "opus": {}, "wav": {},
+		"aac": {}, "m4a": {}, "wma": {}, "dsf": {}, "ape": {},
+	}
+	videoExtensions = map[string]struct{}{
+		"mp4": {}, "mkv": {}, "mov": {}, "avi": {}, "webm": {},
+		"m4v": {}, "wmv": {}, "flv": {}, "ts": {}, "mts": {},
+	}
+	archiveExtensions = map[string]struct{}{
+		"zip": {}, "tar": {}, "gz": {}, "tgz": {}, "xz": {}, "bz2": {}, "7z": {}, "rar": {},
+		"zst": {}, "lz": {}, "lz4": {}, "lzma": {},
+		"iso": {}, "img": {}, "dmg": {},
+	}
+)
+
+type Entry struct {
+	Name           string
+	Path           string
+	Extension      string
+	Mode           fs.FileMode
+	Size           int64
+	ModifiedAt     time.Time
+	CreatedAt      time.Time
+	CreatedKnown   bool
+	IsDir          bool
+	IsParent       bool
+	IsHidden       bool
+	IsRemote       bool
+	Connected      bool
+	DirSizeKnown   bool
+	RemoteHostName string
+}
+
+func (e Entry) DisplayName() string {
+	if e.IsParent {
+		return ".."
+	}
+	if e.IsDir {
+		return e.Name + "/"
+	}
+	return e.Name
+}
+
+func (e Entry) IsFile() bool {
+	return !e.IsDir && !e.IsParent
+}
+
+func (e Entry) MatchKey() string {
+	return strings.ToLower(e.Name)
+}
+
+func (e Entry) IsExecutable() bool {
+	return !e.IsDir && !e.IsParent && e.Mode&0o111 != 0
+}
+
+func (e Entry) Category() string {
+	switch {
+	case e.IsParent:
+		return "parent"
+	case e.IsRemote:
+		return "remote"
+	case e.IsDir:
+		return "directory"
+	case hasExt(configExtensions, e.Extension):
+		return "config"
+	case hasExt(textExtensions, e.Extension):
+		return "text"
+	case hasExt(textFilenames, strings.ToLower(e.Name)):
+		return "text"
+	case hasExt(imageExtensions, e.Extension):
+		return "image"
+	case hasExt(pdfExtensions, e.Extension):
+		return "pdf"
+	case hasExt(audioExtensions, e.Extension):
+		return "audio"
+	case hasExt(videoExtensions, e.Extension):
+		return "video"
+	case hasExt(archiveExtensions, e.Extension):
+		return "archive"
+	case e.IsExecutable():
+		return "executable"
+	default:
+		return "binary"
+	}
+}
+
+func ext(name string) string {
+	value := strings.TrimPrefix(filepath.Ext(name), ".")
+	return strings.ToLower(value)
+}
+
+func hasExt(set map[string]struct{}, ext string) bool {
+	_, ok := set[strings.ToLower(ext)]
+	return ok
+}

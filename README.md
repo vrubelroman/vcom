@@ -56,7 +56,11 @@ curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.5/vcom_0.2.5
 sudo apt install /tmp/vcom_0.2.5_amd64.deb
 ```
 
-The Debian package declares `ueberzug` (or `ueberzugpp` where available) as a dependency for image preview outside `kitty`.
+The Debian package recommends `ueberzugpp` for image preview outside `kitty` (optional). To install it:
+
+```bash
+sudo apt install pipx && pipx ensurepath && pipx install ueberzugpp
+```
 
 ### Arch Linux
 

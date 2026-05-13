@@ -1,0 +1,45 @@
+[startup]
+left_path = ''
+right_path = ''
+
+[ui]
+app_title = 'vcom'
+theme = 'github-dark'
+icon_mode = 'auto'
+show_title_bar = true
+show_footer = true
+border = 'rounded'
+path_display = 'smart'
+pane_gap = 1
+center_width_percent = 30
+
+[browser]
+show_hidden = true
+dirs_first = true
+human_readable_size = true
+
+[browser.sort]
+by = 'name'
+reverse = false
+
+[browser.columns]
+name = true
+size = true
+modified = true
+created = false
+permissions = false
+extension = false
+
+[preview]
+show_metadata = true
+wrap_text = false
+max_preview_bytes = 65536
+directory_preview_limit = 80
+
+[behavior]
+confirm_delete = true
+confirm_overwrite = true
+calculate_dir_size_on_space = true
+follow_symlinks = false
+auto_refresh = true
+auto_refresh_interval = 5
