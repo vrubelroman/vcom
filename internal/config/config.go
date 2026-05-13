@@ -70,8 +70,6 @@ type BehaviorConfig struct {
 	ConfirmOverwrite        bool `toml:"confirm_overwrite"`
 	CalculateDirSizeOnSpace bool `toml:"calculate_dir_size_on_space"`
 	FollowSymlinks          bool `toml:"follow_symlinks"`
-	AutoRefresh             bool `toml:"auto_refresh"`
-	AutoRefreshInterval     int  `toml:"auto_refresh_interval"`
 }
 
 func Default() Config {
@@ -113,8 +111,6 @@ func Default() Config {
 			ConfirmOverwrite:        true,
 			CalculateDirSizeOnSpace: true,
 			FollowSymlinks:          false,
-			AutoRefresh:             true,
-			AutoRefreshInterval:     5,
 		},
 	}
 }
@@ -208,14 +204,6 @@ func (c *Config) Validate() error {
 	}
 	if c.UI.CenterWidthPercent < 20 || c.UI.CenterWidthPercent > 60 {
 		return errors.New("ui.center_width_percent must be between 20 and 60")
-	}
-	if c.Behavior.AutoRefresh {
-		if c.Behavior.AutoRefreshInterval < 1 {
-			c.Behavior.AutoRefreshInterval = 5
-		}
-		if c.Behavior.AutoRefreshInterval > 60 {
-			return errors.New("behavior.auto_refresh_interval must be between 1 and 60")
-		}
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Browser.Sort.By)) {
 	case "", "name":

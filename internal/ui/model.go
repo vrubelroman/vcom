@@ -167,7 +167,6 @@ type copyDoneMsg struct {
 
 type dismissNoticeMsg struct{}
 type dismissYankFlashMsg struct{}
-type tickMsg struct{}
 type externalOpenMsg struct {
 	path string
 	err  error
@@ -334,9 +333,6 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.cfg.Behavior.AutoRefresh {
-		return tea.Batch(m.loadPreviewCmd(), autoRefreshTickCmd(m.cfg.Behavior.AutoRefreshInterval))
-	}
 	return m.loadPreviewCmd()
 }
 
@@ -922,20 +918,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.yankFlashLine = -1
 		m.syncPreviewContent()
 		return m, nil
-
-	case tickMsg:
-		if !m.cfg.Behavior.AutoRefresh ||
-			m.busy ||
-			m.copyJob != nil ||
-			m.archiveJob != nil ||
-			m.modal.kind != modalNone ||
-			m.filterMode ||
-			m.cursorMode || m.visualMode ||
-			m.viewMode {
-			return m, autoRefreshTickCmd(m.cfg.Behavior.AutoRefreshInterval)
-		}
-		m.autoRefreshPanes()
-		return m, tea.Batch(autoRefreshTickCmd(m.cfg.Behavior.AutoRefreshInterval), m.loadPreviewCmd())
 
 	case externalOpenMsg:
 		if msg.err != nil {
@@ -1788,20 +1770,7 @@ func (m *Model) refreshAllPanes(status string) (tea.Model, tea.Cmd) {
 	return m, m.loadPreviewCmd()
 }
 
-func (m *Model) autoRefreshPanes() {
-	for _, id := range []PaneID{PaneLeft, PaneRight} {
-		pane := m.paneByID(id)
-		if pane.InRemote() || pane.InArchive() {
-			continue
-		}
-		if name := selectedName(pane); name != "" {
-			pane.SaveCursor(pane.Path, name)
-		}
-		if err := m.reloadPane(id, pane.LoadCursor(pane.Path)); err != nil {
-			log.Printf("[REFRESH] pane=%s path=%s err=%v", id, pane.Path, err)
-		}
-	}
-}
+
 
 func (m *Model) moveCursor(delta int) {
 	// When a filter query is active on this pane, move through filtered entries
@@ -4922,12 +4891,6 @@ func dismissNoticeCmd(delay time.Duration) tea.Cmd {
 func dismissYankFlashCmd(delay time.Duration) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		return dismissYankFlashMsg{}
-	})
-}
-
-func autoRefreshTickCmd(seconds int) tea.Cmd {
-	return tea.Tick(time.Duration(seconds)*time.Second, func(time.Time) tea.Msg {
-		return tickMsg{}
 	})
 }
 
