@@ -1104,7 +1104,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterMode = false
 				m.status = "Filter cleared"
 				return m, nil
-			case key.Matches(msg, m.keys.Confirm):
+			case msg.String() == "enter":
 				log.Printf("[KEY] Filter: Enter — query=%s", m.filterQuery)
 				m.filterMode = false
 				m.filterInput.Blur()
@@ -1404,7 +1404,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.modal = modalState{}
 			m.status = "Cancelled"
 			return m, nil
-		case key.Matches(msg, m.keys.Confirm):
+		case msg.String() == "enter":
 			value := strings.TrimSpace(m.modal.input.Value())
 			if value == "" {
 				if m.modal.kind == modalMkdir {
@@ -1603,7 +1603,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.status = "Cancelled"
 			return m, nil
-		case key.Matches(msg, m.keys.Confirm):
+		case msg.String() == "enter":
 			// If a test is already in progress, ignore
 			if m.ssh != nil && m.ssh.testingConn {
 				return m, nil
