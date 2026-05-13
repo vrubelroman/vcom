@@ -133,7 +133,7 @@ func BuildPreview(entry Entry, options PreviewOptions) Preview {
 	}
 
 	data := buffer.Bytes()
-	if format, dimensions, ok := detectImage(data); ok {
+	if format, dimensions, ok := DetectImage(data); ok {
 		preview.Kind = PreviewKindImage
 		preview.Metadata.ImageFormat = format
 		preview.Metadata.ImageSize = dimensions
@@ -671,7 +671,7 @@ func buildVideoPreview(entry Entry, options PreviewOptions, base Preview) Previe
 	return base
 }
 
-func detectImage(data []byte) (string, string, bool) {
+func DetectImage(data []byte) (string, string, bool) {
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return "", "", false

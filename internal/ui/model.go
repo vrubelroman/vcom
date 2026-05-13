@@ -91,8 +91,9 @@ type themeSelectorState struct {
 }
 
 type previewMsg struct {
-	entryPath string
-	preview   vfs.Preview
+	entryPath       string
+	preview         vfs.Preview
+	remoteImageTemp string // temp file path for downloaded remote image, cleared on change
 }
 
 type dirSizeMsg struct {
@@ -259,9 +260,10 @@ type Model struct {
 	archiveProgress chan tea.Msg
 	archiveFormat   string
 	deleteKind      string // "trash" or "permanent" — selected in delete modal
-	ssh             *sshState
-	preSSHPath      string              // original path before entering SSH mode
-	themeSelector   *themeSelectorState // nil when not in theme selector dialog
+	ssh              *sshState
+	preSSHPath       string              // original path before entering SSH mode
+	themeSelector    *themeSelectorState // nil when not in theme selector dialog
+	remoteImageTemp  string              // temp file of downloaded remote image, cleaned on change/quit
 }
 
 func NewModel(cfg config.Config, configPath string) (Model, error) {
@@ -350,6 +352,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("[EVENT] previewMsg: path=%s kind=%s", msg.entryPath, msg.preview.Kind)
 		if selected, ok := m.activePane().Selected(); ok && selected.Path == msg.entryPath {
 			m.applyPreview(msg.preview)
+			// Track remote image temp file for cleanup
+			if msg.remoteImageTemp != "" {
+				if m.remoteImageTemp != "" && m.remoteImageTemp != msg.remoteImageTemp {
+					os.Remove(m.remoteImageTemp)
+				}
+				m.remoteImageTemp = msg.remoteImageTemp
+			} else if msg.preview.Kind != vfs.PreviewKindImage && m.remoteImageTemp != "" {
+				os.Remove(m.remoteImageTemp)
+				m.remoteImageTemp = ""
+			}
 		}
 		if m.selectMode && !m.viewMode && msg.preview.Kind != vfs.PreviewKindText {
 			m.selectMode = false
@@ -1144,6 +1156,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.saveSession()
 			m.cleanupArchiveMounts()
 			m.cleanupImageOverlay()
+			m.cleanupRemoteImageTemp()
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Help):
 			log.Printf("[KEY] Help — open help modal")
@@ -2216,7 +2229,8 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 		}
 	}
 
-	// Remote preview: read file via SFTP and build a text preview
+	// Remote preview: read file via SFTP, detect kind, build preview.
+	// Images are downloaded to a local temp file so the overlay (ueberzugpp/kitty) can read them.
 	if mount, ok := m.activePane().CurrentRemote(); ok {
 		return func() tea.Msg {
 			rc, err := mount.Client.ReadFile(selected.Path)
@@ -2232,8 +2246,8 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 			}
 			defer rc.Close()
 			maxBytes := int64(m.cfg.Preview.MaxPreviewBytes)
-			limited := io.LimitReader(rc, maxBytes)
-			raw, readErr := io.ReadAll(limited)
+			sample := io.LimitReader(rc, maxBytes)
+			raw, readErr := io.ReadAll(sample)
 			if readErr != nil {
 				return previewMsg{
 					entryPath: selected.Path,
@@ -2244,6 +2258,66 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 					},
 				}
 			}
+
+			meta := vfs.Metadata{
+				Path:        selected.Path,
+				Size:        selected.Size,
+				SizeKnown:   true,
+				Extension:   selected.Extension,
+				Permissions: vfs.Permissions(selected.Mode),
+				ModifiedAt:  vfs.ShortTime(selected.ModifiedAt),
+			}
+
+			// Detect image by magic bytes
+			if format, dims, isImage := vfs.DetectImage(raw); isImage {
+				// Download full image to temp
+				tmpDir := filepath.Join(os.TempDir(), "vcom-remote-images")
+				os.MkdirAll(tmpDir, 0o700)
+				tmpFile, tmpErr := os.CreateTemp(tmpDir, "vcom-img-*"+filepath.Ext(selected.Path))
+				if tmpErr == nil {
+					tmpPath := tmpFile.Name()
+					tmpFile.Close()
+					if dlErr := mount.Client.DownloadFile(selected.Path, tmpPath); dlErr == nil {
+						meta.Path = tmpPath
+						return previewMsg{
+							entryPath:       selected.Path,
+							remoteImageTemp: tmpPath,
+							preview: vfs.Preview{
+								Kind:     vfs.PreviewKindImage,
+								Title:    selected.DisplayName(),
+								Body:     fmt.Sprintf("%s (%s)\n%s", format, dims, vfs.HumanSize(selected.Size)),
+								Metadata: meta,
+							},
+						}
+					}
+					os.Remove(tmpPath)
+				}
+				// Download failed — show as image with metadata only
+				return previewMsg{
+					entryPath: selected.Path,
+					preview: vfs.Preview{
+						Kind:     vfs.PreviewKindImage,
+						Title:    selected.DisplayName(),
+						Body:     fmt.Sprintf("%s (%s)\n(remote — could not download for overlay)", format, dims),
+						Metadata: meta,
+					},
+				}
+			}
+
+			// Detect binary (non-image)
+			if vfs.IsBinarySample(raw) {
+				return previewMsg{
+					entryPath: selected.Path,
+					preview: vfs.Preview{
+						Kind:     vfs.PreviewKindBinary,
+						Title:    selected.DisplayName(),
+						Body:     fmt.Sprintf("Binary file\n%s • %s", vfs.HumanSize(selected.Size), selected.Extension),
+						Metadata: meta,
+					},
+				}
+			}
+
+			// Text preview
 			body := string(raw)
 			if int64(len(raw)) >= maxBytes {
 				body += "\n\n[... truncated ...]"
@@ -2255,14 +2329,7 @@ func (m Model) loadPreviewCmd() tea.Cmd {
 					Title:     selected.DisplayName(),
 					Body:      body,
 					PlainBody: body,
-					Metadata: vfs.Metadata{
-						Path:        selected.Path,
-						Size:        selected.Size,
-						SizeKnown:   true,
-						Extension:   selected.Extension,
-						Permissions: vfs.Permissions(selected.Mode),
-						ModifiedAt:  vfs.ShortTime(selected.ModifiedAt),
-					},
+					Metadata:  meta,
 				},
 			}
 		}
@@ -5782,6 +5849,13 @@ func (m *Model) cleanupImageOverlay() {
 		return
 	}
 	m.overlay.stop()
+}
+
+func (m *Model) cleanupRemoteImageTemp() {
+	if m.remoteImageTemp != "" {
+		os.Remove(m.remoteImageTemp)
+		m.remoteImageTemp = ""
+	}
 }
 
 func (m *Model) hoverIndexFor(pane PaneID) int {

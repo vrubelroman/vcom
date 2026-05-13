@@ -485,6 +485,11 @@ func (c *SSHClient) CopyFileFromRemote(remotePath, localPath string) error {
 	return nil
 }
 
+// DownloadFile downloads a remote file to a local path via SFTP.
+func (c *SSHClient) DownloadFile(remotePath, localPath string) error {
+	return c.CopyFileFromRemote(remotePath, localPath)
+}
+
 // CopyDirToRemote recursively copies a local directory to a remote path.
 func (c *SSHClient) CopyDirToRemote(localDir, remoteDir string) error {
 	return c.copyDirToRemote(localDir, remoteDir, nil, nil)
