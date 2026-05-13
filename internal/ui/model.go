@@ -2358,17 +2358,20 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 		kind, m.active, srcPane.Path, dstPane.Path, srcHasRemote, dstHasRemote, sources)
 
 	// Check for existing targets (fast — one Stat per top-level item)
+	// Skip when target is remote — local fs check doesn't apply.
 	existingTargets := 0
-	for _, sourcePath := range sources {
-		targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
-		exists, err := vfs.PathExists(targetPath)
-		if err != nil {
-			log.Printf("[ERROR] Transfer: path check failed: %s err=%v", targetPath, err)
-			m.status = err.Error()
-			return m, nil
-		}
-		if exists {
-			existingTargets++
+	if !dstHasRemote {
+		for _, sourcePath := range sources {
+			targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
+			exists, err := vfs.PathExists(targetPath)
+			if err != nil {
+				log.Printf("[ERROR] Transfer: path check failed: %s err=%v", targetPath, err)
+				m.status = err.Error()
+				return m, nil
+			}
+			if exists {
+				existingTargets++
+			}
 		}
 	}
 	overwrite := existingTargets > 0
