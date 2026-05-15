@@ -15,6 +15,14 @@
 ![vcom screenshot 2](docs/screen2.png)
 ![vcom screenshot 3](docs/screen3.png)
 
+## Quick install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vrubelroman/vcom/main/scripts/install.sh | bash
+```
+
+This single command installs vcom with Nerd Font and image preview support on any Linux distribution.
+
 ## Build and run
 
 Run directly:
@@ -36,13 +44,13 @@ go build -o vcom ./cmd/vcom
 Run directly from the flake:
 
 ```bash
-nix run github:vrubelroman/vcom?ref=v0.2.5
+nix run github:vrubelroman/vcom?ref=v0.2.6
 ```
 
 Install into user profile:
 
 ```bash
-nix profile add github:vrubelroman/vcom?ref=v0.2.5
+nix profile add github:vrubelroman/vcom?ref=v0.2.6
 ```
 
 The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works in non-`kitty` terminals out of the box.
@@ -52,8 +60,8 @@ The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works
 Download and install the latest release:
 
 ```bash
-curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.5/vcom_0.2.5_amd64.deb -o /tmp/vcom_0.2.5_amd64.deb
-sudo apt install /tmp/vcom_0.2.5_amd64.deb
+curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.6/vcom_0.2.6_amd64.deb -o /tmp/vcom_0.2.6_amd64.deb
+sudo apt install /tmp/vcom_0.2.6_amd64.deb
 ```
 
 The Debian package recommends `ueberzugpp` for image preview outside `kitty` (optional). To install it:
@@ -71,6 +79,27 @@ makepkg -si
 ```
 
 The Arch package depends on `ueberzugpp`, so non-`kitty` image preview is installed together with `vcom`.
+
+### Fedora / RHEL
+
+Download and install the latest RPM:
+
+```bash
+curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.6/vcom-0.2.6-1.x86_64.rpm -o /tmp/vcom.rpm
+sudo dnf install /tmp/vcom.rpm
+```
+
+Or on RHEL/CentOS:
+
+```bash
+sudo rpm -ivh /tmp/vcom.rpm
+```
+
+The RPM package recommends `ueberzugpp` for image preview outside `kitty` (optional):
+
+```bash
+sudo dnf install ueberzugpp
+```
 
 ## Font requirement (icons)
 
@@ -187,19 +216,21 @@ Built-in themes (press `t` to open theme selector or set `ui.theme` in config):
 
 ## Releases
 
-Pushing a tag like `v0.2.5` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
+Pushing a tag like `v0.2.6` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
 
 - runs tests
 - vendors Go modules
 - builds release binary
 - builds Debian package
+- builds RPM package
 - publishes release assets
 
 Release artifacts:
 
-- `vcom-v0.2.5-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_0.2.5_amd64.deb`
-- `vcom-v0.2.5-checksums.txt`
+- `vcom-v0.2.6-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_0.2.6_amd64.deb`
+- `vcom-0.2.6-1.x86_64.rpm`
+- `vcom-v0.2.6-checksums.txt`
 
 ## Notes
 

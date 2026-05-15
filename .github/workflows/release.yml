@@ -41,7 +41,7 @@ jobs:
           cache: true
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev rpm
 
       - name: Derive release version
         shell: bash
@@ -61,6 +61,10 @@ jobs:
         shell: bash
         run: ./scripts/build-deb.sh "${VERSION}"
 
+      - name: Build rpm package
+        shell: bash
+        run: ./scripts/build-rpm.sh "${VERSION}"
+
       - name: Bundle tarball
         shell: bash
         run: |
@@ -74,6 +78,7 @@ jobs:
           sha256sum \
             "${BIN_NAME}-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" \
             "target/debian/${BIN_NAME}_${VERSION}_amd64.deb" \
+            "target/rpm/${BIN_NAME}-${VERSION}-1.x86_64.rpm" \
             > "${BIN_NAME}-${GITHUB_REF_NAME}-checksums.txt"
 
       - name: Publish release assets
@@ -84,3 +89,4 @@ jobs:
             vcom-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
             vcom-${{ github.ref_name }}-checksums.txt
             target/debian/vcom_${{ env.VERSION }}_amd64.deb
+            target/rpm/vcom-${{ env.VERSION }}-1.x86_64.rpm
