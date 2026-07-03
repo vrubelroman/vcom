@@ -44,13 +44,13 @@ go build -o vcom ./cmd/vcom
 Run directly from the flake:
 
 ```bash
-nix run github:vrubelroman/vcom?ref=v0.2.6
+nix run github:vrubelroman/vcom?ref=v0.2.7
 ```
 
 Install into user profile:
 
 ```bash
-nix profile add github:vrubelroman/vcom?ref=v0.2.6
+nix profile add github:vrubelroman/vcom?ref=v0.2.7
 ```
 
 The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works in non-`kitty` terminals out of the box.
@@ -60,8 +60,8 @@ The Nix package wraps `vcom` with `ueberzugpp` in `PATH`, so image preview works
 Download and install the latest release:
 
 ```bash
-curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.6/vcom_0.2.6_amd64.deb -o /tmp/vcom_0.2.6_amd64.deb
-sudo apt install /tmp/vcom_0.2.6_amd64.deb
+curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.7/vcom_0.2.7_amd64.deb -o /tmp/vcom_0.2.7_amd64.deb
+sudo apt install /tmp/vcom_0.2.7_amd64.deb
 ```
 
 The Debian package recommends `ueberzugpp` for image preview outside `kitty` (optional). To install it:
@@ -85,7 +85,7 @@ The Arch package depends on `ueberzugpp`, so non-`kitty` image preview is instal
 Download and install the latest RPM:
 
 ```bash
-curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.6/vcom-0.2.6-1.x86_64.rpm -o /tmp/vcom.rpm
+curl -sL https://github.com/vrubelroman/vcom/releases/download/v0.2.7/vcom-0.2.7-1.x86_64.rpm -o /tmp/vcom.rpm
 sudo dnf install /tmp/vcom.rpm
 ```
 
@@ -216,7 +216,7 @@ Built-in themes (press `t` to open theme selector or set `ui.theme` in config):
 
 ## Releases
 
-Pushing a tag like `v0.2.6` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
+Pushing a tag like `v0.2.7` triggers GitHub Actions release workflow (`.github/workflows/release.yml`) which:
 
 - runs tests
 - vendors Go modules
@@ -227,10 +227,10 @@ Pushing a tag like `v0.2.6` triggers GitHub Actions release workflow (`.github/w
 
 Release artifacts:
 
-- `vcom-v0.2.6-x86_64-unknown-linux-gnu.tar.gz`
-- `vcom_0.2.6_amd64.deb`
-- `vcom-0.2.6-1.x86_64.rpm`
-- `vcom-v0.2.6-checksums.txt`
+- `vcom-v0.2.7-x86_64-unknown-linux-gnu.tar.gz`
+- `vcom_0.2.7_amd64.deb`
+- `vcom-0.2.7-1.x86_64.rpm`
+- `vcom-v0.2.7-checksums.txt`
 
 ## Notes
 
