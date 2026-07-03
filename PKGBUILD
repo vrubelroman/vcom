@@ -1,5 +1,5 @@
 pkgname=vcom
-pkgver=0.2.6
+pkgver=0.2.7
 pkgrel=1
 pkgdesc="Terminal file manager inspired by Midnight Commander"
 arch=("x86_64" "aarch64")
