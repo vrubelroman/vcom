@@ -110,33 +110,9 @@ type opMsg struct {
 	err        error
 }
 
-type copyPlanMsg struct {
-	kind            fileOpKind
-	sourcePaths     []string
-	targetDir       string
-	overwrite       bool
-	existingTargets int
-	stats           vfs.TransferStats
-	err             error
-
-	// Remote operation fields
-	srcClient *remote.SSHClient
-	dstClient *remote.SSHClient
-}
-
 type copyProgressMsg struct {
 	jobID    int
 	progress vfs.CopyProgress
-}
-
-type deletePlanMsg struct {
-	kind        fileOpKind
-	sourcePaths []string
-	stats       vfs.TransferStats
-	err         error
-
-	// Remote operation — non-nil when source is remote
-	srcClient *remote.SSHClient
 }
 
 type archivePlanMsg struct {
@@ -569,86 +545,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, m.loadPreviewCmd()
-
-	case copyPlanMsg:
-		m.busy = false
-		if msg.err != nil {
-			log.Printf("[ERROR] copyPlanMsg: err=%v", msg.err)
-			m.status = msg.err.Error()
-			return m, nil
-		}
-
-		remoteInfo := ""
-		if msg.srcClient != nil {
-			remoteInfo = " source=remote"
-		}
-		if msg.dstClient != nil {
-			remoteInfo += " target=remote"
-		}
-		log.Printf("[PLAN] copyPlanMsg: kind=%d sources=%d files=%d size=%d targetDir=%s%s",
-			msg.kind, len(msg.sourcePaths), msg.stats.FilesTotal, msg.stats.BytesTotal, msg.targetDir, remoteInfo)
-
-		verb := operationVerb(msg.kind)
-		title := fmt.Sprintf("%s selected entry?", strings.Title(verb))
-		if msg.srcClient != nil || msg.dstClient != nil {
-			title = fmt.Sprintf("%s selected entry via SFTP?", strings.Title(verb))
-		}
-		body := strings.Join([]string{
-			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
-			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
-			fmt.Sprintf("Size:  %s", formatSize(msg.stats.BytesTotal, true)),
-		}, "\n")
-		note := "confirm-actions"
-		m.openConfirmModal(title, body, note, pendingOperation{
-			kind:            msg.kind,
-			sourcePaths:     append([]string(nil), msg.sourcePaths...),
-			targetDir:       msg.targetDir,
-			overwrite:       msg.overwrite,
-			existingTargets: msg.existingTargets,
-			stats:           msg.stats,
-			srcClient:       msg.srcClient,
-			dstClient:       msg.dstClient,
-		})
-		return m, nil
-
-	case deletePlanMsg:
-		m.busy = false
-		if msg.err != nil {
-			log.Printf("[ERROR] deletePlanMsg: err=%v", msg.err)
-			m.status = msg.err.Error()
-			return m, nil
-		}
-
-		log.Printf("[PLAN] deletePlanMsg: kind=%d sources=%d files=%d size=%d remote=%v",
-			msg.kind, len(msg.sourcePaths), msg.stats.FilesTotal, msg.stats.BytesTotal, msg.srcClient != nil)
-
-		title := "Move selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + " to trash?"
-		if msg.srcClient != nil {
-			title = "Delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + " from remote?"
-		} else if m.deleteKind == "permanent" {
-			title = "Permanently delete selected entr" + pluralSuffix(len(msg.sourcePaths), "y", "ies") + "?"
-		}
-		bodyLines := []string{
-			fmt.Sprintf("Items: %d", len(msg.sourcePaths)),
-			fmt.Sprintf("Files: %d", msg.stats.FilesTotal),
-			fmt.Sprintf("Size:  %s", formatSize(msg.stats.BytesTotal, true)),
-		}
-		note := "confirm-actions"
-		if msg.srcClient == nil {
-			note = fmt.Sprintf("Mode: %s  (D/d to change)\nEnter / y to confirm, Esc / n to cancel", m.deleteKind)
-		}
-		m.openConfirmModal(
-			title,
-			strings.Join(bodyLines, "\n"),
-			note,
-			pendingOperation{
-				kind:        msg.kind,
-				sourcePaths: append([]string(nil), msg.sourcePaths...),
-				stats:       msg.stats,
-				srcClient:   msg.srcClient,
-			},
-		)
-		return m, nil
 
 	case archivePlanMsg:
 		m.busy = false
@@ -1487,11 +1383,14 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.executeSSHHostDelete(hostName)
 			}
 
-			// Remote delete
+			// Remote delete — same progress modal + cancel support as local delete
 			if pending.srcClient != nil {
-				m.busy = true
+				if m.archiveJob != nil {
+					m.status = "Delete is already running"
+					return m, nil
+				}
 				log.Printf("[MODAL] Confirm — remote delete sources=%d", len(pending.sourcePaths))
-				return m, m.remoteDeleteCmd(pending.sourcePaths, pending.srcClient)
+				return m, m.startRemoteDeleteJob(pending.sourcePaths, pending.srcClient)
 			}
 
 			// Adjust delete kind based on mode toggle
@@ -2404,21 +2303,33 @@ func (m *Model) handleTransfer(kind fileOpKind) (tea.Model, tea.Cmd) {
 	log.Printf("[ACTION] Transfer: kind=%d active=%s srcPath=%s dstPath=%s srcRemote=%v dstRemote=%v sources=%v",
 		kind, m.active, srcPane.Path, dstPane.Path, srcHasRemote, dstHasRemote, sources)
 
-	// Check for existing targets (fast — one Stat per top-level item)
-	// Skip when target is remote — local fs check doesn't apply.
+	// Check for existing targets (fast — one Stat per top-level item), so
+	// the confirm dialog below can warn about overwrites regardless of
+	// whether the destination is local or remote.
 	existingTargets := 0
-	if !dstHasRemote {
-		for _, sourcePath := range sources {
-			targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
-			exists, err := vfs.PathExists(targetPath)
+	for _, sourcePath := range sources {
+		targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
+		var exists bool
+		if dstHasRemote {
+			_, statErr := dstRemote.Client.Lstat(targetPath)
+			if statErr == nil {
+				exists = true
+			} else if !os.IsNotExist(statErr) {
+				log.Printf("[ERROR] Transfer: remote path check failed: %s err=%v", targetPath, statErr)
+				m.status = statErr.Error()
+				return m, nil
+			}
+		} else {
+			var err error
+			exists, err = vfs.PathExists(targetPath)
 			if err != nil {
 				log.Printf("[ERROR] Transfer: path check failed: %s err=%v", targetPath, err)
 				m.status = err.Error()
 				return m, nil
 			}
-			if exists {
-				existingTargets++
-			}
+		}
+		if exists {
+			existingTargets++
 		}
 	}
 	overwrite := existingTargets > 0
@@ -4764,134 +4675,6 @@ func remoteDirSizeCmd(client *remote.SSHClient, path string) tea.Cmd {
 	}
 }
 
-func copyPlanCmd(kind fileOpKind, sourcePaths []string, targetDir string, overwrite bool, existingTargets int) tea.Cmd {
-	return func() tea.Msg {
-		stats := vfs.TransferStats{}
-		var err error
-		for _, sourcePath := range sourcePaths {
-			part, statErr := vfs.CopyStats(sourcePath)
-			if statErr != nil {
-				err = statErr
-				break
-			}
-			stats.FilesTotal += part.FilesTotal
-			stats.BytesTotal += part.BytesTotal
-		}
-		return copyPlanMsg{
-			kind:            kind,
-			sourcePaths:     append([]string(nil), sourcePaths...),
-			targetDir:       targetDir,
-			overwrite:       overwrite,
-			existingTargets: existingTargets,
-			stats:           stats,
-			err:             err,
-		}
-	}
-}
-
-// remoteCopyPlanCmd computes transfer stats for remote-involved copy/move operations.
-// For local sources it uses vfs.CopyStats; for remote sources it walks the SFTP tree.
-func (m *Model) remoteCopyPlanCmd(kind fileOpKind, sourcePaths []string, targetDir string,
-	sourceIsRemote, targetIsRemote bool, srcClient, dstClient *remote.SSHClient) tea.Cmd {
-
-	return func() tea.Msg {
-		stats := vfs.TransferStats{}
-		var err error
-
-		for _, sourcePath := range sourcePaths {
-			if !sourceIsRemote {
-				// Local source — use existing stats function
-				part, statErr := vfs.CopyStats(sourcePath)
-				if statErr != nil {
-					err = statErr
-					break
-				}
-				stats.FilesTotal += part.FilesTotal
-				stats.BytesTotal += part.BytesTotal
-			} else {
-				// Remote source — walk via SFTP
-				info, statErr := srcClient.Lstat(sourcePath)
-				if statErr != nil {
-					err = statErr
-					break
-				}
-				if !info.IsDir() {
-					stats.FilesTotal++
-					stats.BytesTotal += info.Size()
-				} else {
-					walkErr := srcClient.Walk(sourcePath, func(walkPath string, info os.FileInfo, walkErr error) error {
-						if walkErr != nil {
-							return walkErr
-						}
-						if !info.IsDir() {
-							stats.FilesTotal++
-							stats.BytesTotal += info.Size()
-						}
-						return nil
-					})
-					if walkErr != nil {
-						err = walkErr
-						break
-					}
-				}
-			}
-		}
-
-		return copyPlanMsg{
-			kind:        kind,
-			sourcePaths: append([]string(nil), sourcePaths...),
-			targetDir:   targetDir,
-			stats:       stats,
-			err:         err,
-			srcClient:   srcClient,
-			dstClient:   dstClient,
-		}
-	}
-}
-
-// remoteDeletePlanCmd computes delete stats for remote paths via SFTP.
-func (m *Model) remoteDeletePlanCmd(sources []string, client *remote.SSHClient) tea.Cmd {
-	return func() tea.Msg {
-		stats := vfs.TransferStats{}
-		var err error
-
-		for _, sourcePath := range sources {
-			info, statErr := client.Lstat(sourcePath)
-			if statErr != nil {
-				err = statErr
-				break
-			}
-			if !info.IsDir() {
-				stats.FilesTotal++
-				stats.BytesTotal += info.Size()
-			} else {
-				walkErr := client.Walk(sourcePath, func(walkPath string, info os.FileInfo, walkErr error) error {
-					if walkErr != nil {
-						return walkErr
-					}
-					if !info.IsDir() {
-						stats.FilesTotal++
-						stats.BytesTotal += info.Size()
-					}
-					return nil
-				})
-				if walkErr != nil {
-					err = walkErr
-					break
-				}
-			}
-		}
-
-		return deletePlanMsg{
-			kind:        opDelete,
-			sourcePaths: append([]string(nil), sources...),
-			stats:       stats,
-			err:         err,
-			srcClient:   client,
-		}
-	}
-}
-
 func (m *Model) enterArchive(selected vfs.Entry) error {
 	pane := m.activePane()
 	// Save current path to history before opening the archive.
@@ -5299,50 +5082,6 @@ func deletePathsPermanentCmd(paths []string) tea.Cmd {
 			}
 		}
 		return opMsg{kind: opPermanentDelete}
-	}
-}
-
-func trashPlanCmd(sourcePaths []string) tea.Cmd {
-	return func() tea.Msg {
-		stats := vfs.TransferStats{}
-		var err error
-		for _, sourcePath := range sourcePaths {
-			part, statErr := vfs.CopyStats(sourcePath)
-			if statErr != nil {
-				err = statErr
-				break
-			}
-			stats.FilesTotal += part.FilesTotal
-			stats.BytesTotal += part.BytesTotal
-		}
-		return deletePlanMsg{
-			kind:        opDelete,
-			sourcePaths: append([]string(nil), sourcePaths...),
-			stats:       stats,
-			err:         err,
-		}
-	}
-}
-
-func deletePlanPermanentCmd(sourcePaths []string) tea.Cmd {
-	return func() tea.Msg {
-		stats := vfs.TransferStats{}
-		var err error
-		for _, sourcePath := range sourcePaths {
-			part, statErr := vfs.CopyStats(sourcePath)
-			if statErr != nil {
-				err = statErr
-				break
-			}
-			stats.FilesTotal += part.FilesTotal
-			stats.BytesTotal += part.BytesTotal
-		}
-		return deletePlanMsg{
-			kind:        opPermanentDelete,
-			sourcePaths: append([]string(nil), sourcePaths...),
-			stats:       stats,
-			err:         err,
-		}
 	}
 }
 
@@ -6301,20 +6040,82 @@ func (m *Model) enterRemoteDir(entry vfs.Entry) (tea.Model, tea.Cmd) {
 	return m, m.loadPreviewCmd()
 }
 
-// remoteDeleteCmd deletes files/directories on a remote host via SFTP.
-func (m *Model) remoteDeleteCmd(sources []string, client *remote.SSHClient) tea.Cmd {
-	log.Printf("[ACTION] remoteDeleteCmd: sources=%v", sources)
-	return func() tea.Msg {
-		for _, sourcePath := range sources {
-			log.Printf("[JOB] remoteDelete: removing path=%s", sourcePath)
-			if err := client.RemoveRecursive(sourcePath); err != nil {
-				log.Printf("[ERROR] remoteDelete failed: path=%s err=%v", sourcePath, err)
-				return opMsg{kind: opDelete, sourcePath: sourcePath, err: err}
-			}
-		}
-		log.Printf("[DONE] remoteDelete: completed %d sources", len(sources))
-		return opMsg{kind: opDelete}
+// startRemoteDeleteJob deletes files/directories on a remote host via SFTP,
+// with the same progress modal and mid-job cancellation support as the local
+// delete job (startDeleteJob). There is no remote trash, so this is always a
+// permanent delete.
+func (m *Model) startRemoteDeleteJob(sources []string, client *remote.SSHClient) tea.Cmd {
+	m.nextArchiveJob++
+	jobID := m.nextArchiveJob
+	ctx, cancel := context.WithCancel(context.Background())
+
+	m.archiveJob = &archiveJobState{
+		id:          jobID,
+		kind:        "delete",
+		sourcePaths: append([]string(nil), sources...),
+		targetPath:  "",
+		progress: vfs.CopyProgress{
+			FilesDone:   0,
+			FilesTotal:  len(sources),
+			BytesDone:   0,
+			BytesTotal:  0,
+			CurrentPath: sources[0],
+			Stage:       "delete permanently",
+		},
+		cancel:    cancel,
+		startedAt: time.Now(),
 	}
+	m.modal = modalState{kind: modalArchiveProgress}
+	m.status = "Deleting started"
+
+	log.Printf("[ACTION] startRemoteDeleteJob: job=%d sources=%v", jobID, sources)
+
+	return tea.Batch(
+		func() tea.Msg {
+			go func() {
+				for i, sourcePath := range sources {
+					select {
+					case <-ctx.Done():
+						m.archiveProgress <- archiveDoneMsg{
+							jobID:       jobID,
+							sourcePaths: append([]string(nil), sources...),
+							err:         context.Canceled,
+						}
+						return
+					default:
+					}
+
+					log.Printf("[JOB] remoteDelete: job=%d removing path=%s", jobID, sourcePath)
+					if err := client.RemoveRecursive(sourcePath); err != nil {
+						log.Printf("[ERROR] remoteDelete failed: job=%d path=%s err=%v", jobID, sourcePath, err)
+						m.archiveProgress <- archiveDoneMsg{
+							jobID:       jobID,
+							sourcePaths: append([]string(nil), sources...),
+							err:         fmt.Errorf("delete %s: %w", sourcePath, err),
+						}
+						return
+					}
+
+					m.archiveProgress <- archiveProgressMsg{
+						jobID: jobID,
+						progress: vfs.CopyProgress{
+							FilesDone:   i + 1,
+							FilesTotal:  len(sources),
+							CurrentPath: sourcePath,
+							Stage:       "delete permanently",
+						},
+					}
+				}
+				log.Printf("[DONE] remoteDelete: job=%d completed %d sources", jobID, len(sources))
+				m.archiveProgress <- archiveDoneMsg{
+					jobID:       jobID,
+					sourcePaths: append([]string(nil), sources...),
+				}
+			}()
+			return nil
+		},
+		waitArchiveProgressCmd(m.archiveProgress),
+	)
 }
 
 // remoteTransferCmd copies or moves files between local and remote filesystems.
@@ -6516,8 +6317,8 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 
 						if srcClient.SameHostAs(dstClient) {
 							// Same host: use server-side commands, no local streaming
-							srcEscaped := "'" + sourcePath + "'"
-							dstEscaped := "'" + targetPath + "'"
+							srcEscaped := remote.ShellQuote(sourcePath)
+							dstEscaped := remote.ShellQuote(targetPath)
 							if kind == opMove {
 								log.Printf("[JOB] remoteCopy — same-host move: job=%d src=%s dst=%s", jobID, sourcePath, targetPath)
 								_, err = srcClient.Exec("mv " + srcEscaped + " " + dstEscaped)
@@ -6542,20 +6343,13 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 								if !info.IsDir() {
 									cmd = "cp"
 								}
-								err = srcClient.ExecWithProgress(cmd+" "+srcEscaped+" "+dstEscaped, func(line string) {
-									// cp -rv outputs one line per copied file
-									doneFiles++
-									log.Printf("[JOB] remoteCopy — same-host progress: job=%d doneFiles=%d line=%s", jobID, doneFiles, line)
-									m.copyProgress <- copyProgressMsg{
-										jobID: jobID,
-										progress: vfs.CopyProgress{
-											FilesDone:   doneFiles,
-											FilesTotal:  totalFiles,
-											CurrentPath: line,
-											Stage:       "Copying files...",
-										},
-									}
-								})
+								// No live per-file progress here: without -v, cp
+								// prints nothing to parse, and -v's output isn't
+								// guaranteed to map 1:1 onto our file-only counts
+								// (it also reports directories). doneFiles is
+								// credited in one step below once the command
+								// completes instead.
+								_, err = srcClient.Exec(cmd + " " + srcEscaped + " " + dstEscaped)
 								if err == nil {
 									serverSide = true
 								} else {
@@ -6630,10 +6424,13 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 
 					log.Printf("[JOB] remoteCopy — source done: job=%d path=%s err=%v doneFiles=%d totalFiles=%d serverSide=%v",
 						jobID, sourcePath, err, doneFiles, totalFiles, serverSide)
-					if !serverSide || kind == opMove {
-						if !trackedProgress {
-							doneFiles += sourceCounts[i]
-						}
+					// Credit this source's files once, however the transfer
+					// happened. Callbacks that already reported per-file
+					// progress (trackedProgress) are the only case to skip,
+					// to avoid double-counting; server-side cp has no such
+					// callback, so it must be credited here too.
+					if !trackedProgress {
+						doneFiles += sourceCounts[i]
 					}
 					if info != nil && !info.IsDir() {
 						doneBytes += info.Size()

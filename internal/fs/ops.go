@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,6 +67,13 @@ func CopyPathWithProgressContext(ctx context.Context, srcPath string, dstDir str
 		return "", err
 	} else if same {
 		return "", fmt.Errorf("source and target are the same: %s", targetPath)
+	}
+	if srcInfo.IsDir() {
+		if within, err := pathWithin(targetPath, srcPath); err != nil {
+			return "", err
+		} else if within {
+			return "", fmt.Errorf("cannot copy %q into itself", srcPath)
+		}
 	}
 
 	if exists, err := PathExists(targetPath); err != nil {
@@ -188,6 +196,13 @@ func MovePathWithProgressContext(ctx context.Context, srcPath string, dstDir str
 		return "", err
 	} else if same {
 		return "", fmt.Errorf("source and target are the same: %s", targetPath)
+	}
+	if srcInfo, statErr := os.Lstat(srcPath); statErr == nil && srcInfo.IsDir() {
+		if within, err := pathWithin(targetPath, srcPath); err != nil {
+			return "", err
+		} else if within {
+			return "", fmt.Errorf("cannot move %q into itself", srcPath)
+		}
 	}
 
 	if exists, err := PathExists(targetPath); err != nil {
@@ -526,4 +541,23 @@ func samePath(left string, right string) (bool, error) {
 		return false, err
 	}
 	return leftAbs == rightAbs, nil
+}
+
+// pathWithin reports whether child is parent itself or a path nested inside
+// it. Used to reject copying/moving a directory into one of its own
+// descendants, which would otherwise make copyDir recurse into the very
+// destination it's writing, growing without bound until the disk fills.
+func pathWithin(child, parent string) (bool, error) {
+	childAbs, err := filepath.Abs(child)
+	if err != nil {
+		return false, err
+	}
+	parentAbs, err := filepath.Abs(parent)
+	if err != nil {
+		return false, err
+	}
+	if childAbs == parentAbs {
+		return true, nil
+	}
+	return strings.HasPrefix(childAbs, parentAbs+string(filepath.Separator)), nil
 }

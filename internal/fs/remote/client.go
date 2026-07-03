@@ -406,6 +406,15 @@ func (c *SSHClient) IsConnected() bool {
 	return c.sftpCli != nil && c.sshConn != nil
 }
 
+// ShellQuote wraps s in single quotes so it's safe to interpolate into a
+// shell command string passed to Exec/ExecWithProgress, regardless of
+// spaces, `$`, backticks, or other shell metacharacters it contains. Any
+// single quote in s is escaped by closing the quote, emitting an escaped
+// literal quote, and reopening it (the standard POSIX shell idiom).
+func ShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // Exec runs a shell command on the remote server and returns combined output.
 func (c *SSHClient) Exec(cmd string) ([]byte, error) {
 	if c.sshConn == nil {
@@ -678,6 +687,12 @@ func CopyFileBetweenRemotes(srcClient, dstClient *SSHClient, srcPath, dstPath st
 	if dstClient.sftpCli == nil {
 		return fmt.Errorf("destination client not connected")
 	}
+	if srcClient.SameHostAs(dstClient) && path.Clean(srcPath) == path.Clean(dstPath) {
+		// Same file on the same host: dstClient.Create() below would
+		// truncate it before srcFile has finished being read, corrupting
+		// the "copy" into an empty file.
+		return fmt.Errorf("source and target are the same: %s", dstPath)
+	}
 
 	srcFile, err := srcClient.sftpCli.Open(srcPath)
 	if err != nil {
@@ -711,6 +726,13 @@ func CopyDirBetweenRemotes(srcClient, dstClient *SSHClient, srcDir, dstDir strin
 }
 
 func copyDirBetweenRemotes(srcClient, dstClient *SSHClient, srcDir, dstDir string, onFile func(path string, done, total int), ctx context.Context) error {
+	if srcClient.SameHostAs(dstClient) && remotePathWithin(dstDir, srcDir) {
+		// Same host, and the destination is srcDir itself or nested inside
+		// it: MkdirAll below would create the destination inside the very
+		// tree Walk is reading, so the walk would recurse into its own
+		// output and never terminate on its own.
+		return fmt.Errorf("cannot copy %q into itself", srcDir)
+	}
 	done := 0
 	return srcClient.Walk(srcDir, func(remotePath string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -814,6 +836,18 @@ func (c *SSHClient) walk(dirPath string, walkFn walkFunc, info os.FileInfo) erro
 
 // filepathSkipDir is used as a return value from Walk to skip a directory.
 var filepathSkipDir = fmt.Errorf("skip this directory")
+
+// remotePathWithin reports whether child is parent itself or a path nested
+// inside it, using POSIX path semantics (remote paths are always "/"
+// separated regardless of the local OS).
+func remotePathWithin(child, parent string) bool {
+	childClean := path.Clean(child)
+	parentClean := path.Clean(parent)
+	if childClean == parentClean {
+		return true
+	}
+	return strings.HasPrefix(childClean, parentClean+"/")
+}
 
 // isSymlinkToDir reports whether the walk entry at remotePath is a symlink
 // whose target is a directory. Such entries can't be copied with a plain

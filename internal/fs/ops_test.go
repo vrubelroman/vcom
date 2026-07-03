@@ -87,6 +87,56 @@ func TestMovePathWithProgressContextCancelledBeforeStartKeepsSource(t *testing.T
 	}
 }
 
+func TestCopyPathWithProgressContextRejectsCopyIntoOwnSubdirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	nestedDir := filepath.Join(srcDir, "nested")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+
+	_, err := CopyPathWithProgressContext(context.Background(), srcDir, nestedDir, false, TransferStats{}, nil)
+	if err == nil {
+		t.Fatalf("expected error copying directory into its own subdirectory, got nil")
+	}
+
+	entries, readErr := os.ReadDir(nestedDir)
+	if readErr != nil {
+		t.Fatalf("read nested dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected nested dir to remain empty, found %d entries", len(entries))
+	}
+}
+
+func TestMovePathWithProgressContextRejectsMoveIntoOwnSubdirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	nestedDir := filepath.Join(srcDir, "nested")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+
+	_, err := MovePathWithProgressContext(context.Background(), srcDir, nestedDir, false, TransferStats{}, nil)
+	if err == nil {
+		t.Fatalf("expected error moving directory into its own subdirectory, got nil")
+	}
+
+	if _, statErr := os.Stat(srcDir); statErr != nil {
+		t.Fatalf("expected source to remain in place, stat err=%v", statErr)
+	}
+}
+
 func TestRenamePath(t *testing.T) {
 	t.Parallel()
 
