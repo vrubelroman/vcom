@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"vcom/internal/homedir"
 )
 
 // SSHHost represents a single SSH host configuration.
@@ -66,9 +68,9 @@ type HostStore struct {
 
 // NewHostStore creates a new HostStore.
 func NewHostStore() (*HostStore, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("home dir: %w", err)
+	home := homedir.Dir()
+	if home == "" {
+		return nil, fmt.Errorf("cannot determine home directory")
 	}
 
 	store := &HostStore{
@@ -77,6 +79,7 @@ func NewHostStore() (*HostStore, error) {
 
 	// Load or create encryption key
 	keyPath := filepath.Join(home, ".config", "vcom", ".hosts-key")
+	var err error
 	store.cipherKey, err = loadOrCreateKey(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("encryption key: %w", err)

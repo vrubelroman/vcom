@@ -24,6 +24,7 @@ import (
 	"vcom/internal/config"
 	vfs "vcom/internal/fs"
 	"vcom/internal/fs/remote"
+	"vcom/internal/homedir"
 	"vcom/internal/theme"
 )
 
@@ -272,9 +273,9 @@ func NewModel(cfg config.Config, configPath string) (Model, error) {
 		return Model{}, err
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Model{}, fmt.Errorf("resolve home dir: %w", err)
+	home := homedir.Dir()
+	if home == "" {
+		return Model{}, fmt.Errorf("cannot determine home directory")
 	}
 
 	leftPath, err := resolveStartPath(cfg.Startup.LeftPath, home)
@@ -5671,9 +5672,9 @@ func resolveStartPath(raw string, fallback string) (string, error) {
 		return fallback, nil
 	}
 	if strings.HasPrefix(value, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
+		home := homedir.Dir()
+		if home == "" {
+			return "", fmt.Errorf("cannot determine home directory")
 		}
 		value = filepath.Join(home, strings.TrimPrefix(value, "~/"))
 	}
@@ -6466,6 +6467,11 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 								}, ctx)
 							} else {
 								log.Printf("[JOB] remoteCopy — local→remote file: job=%d source=%s target=%s size=%d", jobID, sourcePath, targetPath, info.Size())
+								// Check context before single-file transfer
+								if ctx.Err() != nil {
+									m.copyProgress <- copyDoneMsg{jobID: jobID, kind: kind, sourcePaths: sources, targetDir: targetDir, err: ctx.Err()}
+									return
+								}
 								err = dstClient.CopyFileToRemote(sourcePath, targetPath)
 							}
 						}
@@ -6491,6 +6497,11 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 								}, ctx)
 							} else {
 								log.Printf("[JOB] remoteCopy — remote→local file: job=%d source=%s target=%s size=%d", jobID, sourcePath, targetPath, info.Size())
+								// Check context before single-file transfer so cancel works between files
+								if ctx.Err() != nil {
+									m.copyProgress <- copyDoneMsg{jobID: jobID, kind: kind, sourcePaths: sources, targetDir: targetDir, err: ctx.Err()}
+									return
+								}
 								err = srcClient.CopyFileFromRemote(sourcePath, targetPath)
 							}
 						}
@@ -6570,6 +6581,11 @@ func (m *Model) startRemoteCopyJob(kind fileOpKind, sources []string, targetDir 
 									}
 								}, ctx)
 							} else {
+								// Check context before remote→remote single-file streaming
+								if ctx.Err() != nil {
+									m.copyProgress <- copyDoneMsg{jobID: jobID, kind: kind, sourcePaths: sources, targetDir: targetDir, err: ctx.Err()}
+									return
+								}
 								err = remote.CopyFileBetweenRemotes(srcClient, dstClient, sourcePath, targetPath)
 							}
 						}

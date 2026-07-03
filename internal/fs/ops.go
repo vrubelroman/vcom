@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"vcom/internal/homedir"
 )
 
 type TransferStats struct {
@@ -261,9 +263,9 @@ func DeletePath(path string) error {
 //   - A .trashinfo file is written to Trash/info/<basename>.trashinfo
 //   - If <basename> already exists in Trash/files, a numeric suffix is appended.
 func MoveToTrash(path string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("cannot determine home directory: %w", err)
+	home := homedir.Dir()
+	if home == "" {
+		return fmt.Errorf("cannot determine home directory")
 	}
 
 	trashDir := filepath.Join(home, ".local", "share", "Trash")

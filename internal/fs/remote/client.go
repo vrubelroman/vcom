@@ -3,6 +3,7 @@ package remote
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,10 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
+
+	"vcom/internal/homedir"
 )
 
 // SSHClient wraps an SSH connection and SFTP client for remote filesystem access.
@@ -37,6 +42,11 @@ func Connect(host SSHHost) (*SSHClient, error) {
 		return nil, fmt.Errorf("ssh auth: %w", err)
 	}
 
+	hostKeyCB, err := tofuHostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("host key verification: %w", err)
+	}
+
 	user := host.User
 	if user == "" {
 		user = os.Getenv("USER")
@@ -45,7 +55,7 @@ func Connect(host SSHHost) (*SSHClient, error) {
 	config := &ssh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: support known_hosts verification
+		HostKeyCallback: hostKeyCB,
 		Timeout:         15 * time.Second,
 	}
 
@@ -91,23 +101,101 @@ func Connect(host SSHHost) (*SSHClient, error) {
 	return client, nil
 }
 
+// tofuHostKeyCallback returns a HostKeyCallback that verifies server host keys
+// against ~/.ssh/known_hosts. Unknown hosts are trusted on first use (TOFU,
+// matching `ssh -o StrictHostKeyChecking=accept-new`) and their key is
+// recorded for future connections. A host whose key no longer matches a
+// previously recorded entry is rejected outright, since that's the signature
+// of a man-in-the-middle attack or a legitimately reissued key that the user
+// must verify and update manually (e.g. via `ssh-keygen -R <host>`).
+func tofuHostKeyCallback() (ssh.HostKeyCallback, error) {
+	khPath := KnownHostsPath()
+	if khPath == "" {
+		return nil, fmt.Errorf("cannot determine known_hosts path")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(khPath), 0o700); err != nil {
+		return nil, fmt.Errorf("create ssh dir: %w", err)
+	}
+	if _, err := os.Stat(khPath); os.IsNotExist(err) {
+		f, err := os.OpenFile(khPath, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("create known_hosts: %w", err)
+		}
+		f.Close()
+	}
+
+	verify, err := knownhosts.New(khPath)
+	if err != nil {
+		return nil, fmt.Errorf("parse known_hosts: %w", err)
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := verify(hostname, remote, key)
+		if err == nil {
+			return nil
+		}
+
+		var keyErr *knownhosts.KeyError
+		if errors.As(err, &keyErr) && len(keyErr.Want) > 0 {
+			return fmt.Errorf("REMOTE HOST IDENTIFICATION HAS CHANGED for %s! This may indicate a man-in-the-middle attack, or the server's key was legitimately reissued. Refusing to connect; run `ssh-keygen -R %s` to remove the stale entry once you've verified the new key: %w", hostname, hostname, err)
+		}
+
+		// Unknown host: trust on first use and remember the key.
+		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
+		f, ferr := os.OpenFile(khPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if ferr != nil {
+			return fmt.Errorf("cannot save host key for %s: %w", hostname, ferr)
+		}
+		defer f.Close()
+		if _, werr := f.WriteString(line + "\n"); werr != nil {
+			return fmt.Errorf("cannot save host key for %s: %w", hostname, werr)
+		}
+		return nil
+	}, nil
+}
+
+// sshAgentAuth connects to the running ssh-agent (via SSH_AUTH_SOCK) and
+// returns an auth method backed by its loaded keys, or false if no agent is
+// reachable. The agent connection is intentionally kept open for the life of
+// the process rather than closed here: ssh.PublicKeysCallback invokes the
+// callback lazily during the handshake, well after this function returns.
+func sshAgentAuth() (ssh.AuthMethod, bool) {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		return nil, false
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return nil, false
+	}
+	agentClient := agent.NewClient(conn)
+	return ssh.PublicKeysCallback(agentClient.Signers), true
+}
+
 // authMethodsForHost returns the appropriate SSH auth methods for the given host.
 // For SSH config hosts with IdentityFile, it uses public key authentication.
 // For custom hosts with a password, it uses password authentication.
 func authMethodsForHost(host SSHHost) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
+	var passphraseProtectedKey string
 
-	// Try key-based auth if identity file is specified
+	// Try key-based auth if identity file is specified.
 	if host.IdentityFile != "" {
 		key, err := os.ReadFile(host.IdentityFile)
 		if err == nil {
-			signer, err := ssh.ParsePrivateKey(key)
-			if err == nil {
+			signer, perr := ssh.ParsePrivateKey(key)
+			var passphraseErr *ssh.PassphraseMissingError
+			if perr == nil {
 				methods = append(methods, ssh.PublicKeys(signer))
-			} else {
-				// If the key is encrypted, try with empty passphrase or common ones
-				// For simplicity, we try without passphrase first
-				// In a real implementation, we might prompt for a passphrase
+			} else if errors.As(perr, &passphraseErr) {
+				// The key is encrypted. We have no interactive prompt for a
+				// passphrase yet, but the same key may already be unlocked
+				// in a running ssh-agent, so fall through and try that too.
+				passphraseProtectedKey = host.IdentityFile
+				if authMethod, ok := sshAgentAuth(); ok {
+					methods = append(methods, authMethod)
+				}
 			}
 		}
 	}
@@ -130,13 +218,16 @@ func authMethodsForHost(host SSHHost) ([]ssh.AuthMethod, error) {
 		))
 	}
 
-	// Always try default SSH agent and default keys as a last resort
-	// This covers the case where the user has an SSH agent running with loaded keys
-	// but no IdentityFile is specified in the config.
+	// When no explicit identity file or password is configured, try the
+	// running ssh-agent first (it can supply already-decrypted keys that a
+	// bare file scan cannot), then fall back to scanning default key paths.
 	if host.IdentityFile == "" && host.Password == "" {
-		// Add default key paths
-		home, err := os.UserHomeDir()
-		if err == nil {
+		if authMethod, ok := sshAgentAuth(); ok {
+			methods = append(methods, authMethod)
+		}
+
+		home := homedir.Dir()
+		if home != "" {
 			defaultKeys := []string{
 				home + "/.ssh/id_rsa",
 				home + "/.ssh/id_ed25519",
@@ -156,6 +247,9 @@ func authMethodsForHost(host SSHHost) ([]ssh.AuthMethod, error) {
 	}
 
 	if len(methods) == 0 {
+		if passphraseProtectedKey != "" {
+			return nil, fmt.Errorf("identity file %q is passphrase-protected; load it into ssh-agent first (ssh-add %s)", passphraseProtectedKey, passphraseProtectedKey)
+		}
 		return nil, fmt.Errorf("no authentication methods available for host %q", host.Name)
 	}
 
@@ -557,6 +651,12 @@ func (c *SSHClient) copyDirFromRemote(remoteDir, localDir string, onFile func(pa
 		if info.IsDir() {
 			return os.MkdirAll(localPath, 0o755)
 		}
+		if isSymlinkToDir(c, remotePath, info) {
+			// Copying/dereferencing a symlinked directory isn't supported;
+			// skip it instead of failing the whole transfer trying to Open()
+			// what the SFTP server sees as a directory.
+			return nil
+		}
 		if err := c.CopyFileFromRemote(remotePath, localPath); err != nil {
 			return err
 		}
@@ -628,6 +728,11 @@ func copyDirBetweenRemotes(srcClient, dstClient *SSHClient, srcDir, dstDir strin
 		if info.IsDir() {
 			return dstClient.MkdirAll(dstPath)
 		}
+		if isSymlinkToDir(srcClient, remotePath, info) {
+			// See copyDirFromRemote: a symlink-to-directory can't be opened
+			// as a regular file, so skip it instead of aborting the transfer.
+			return nil
+		}
 		if err := CopyFileBetweenRemotes(srcClient, dstClient, remotePath, dstPath); err != nil {
 			return err
 		}
@@ -654,10 +759,13 @@ func (c *SSHClient) Walk(root string, walkFn walkFunc) error {
 
 func (c *SSHClient) walk(dirPath string, walkFn walkFunc, info os.FileInfo) error {
 	if info == nil {
-		var err error
-		info, err = c.sftpCli.Stat(dirPath)
-		if err != nil {
-			return walkFn(dirPath, nil, err)
+		var statErr error
+		info, statErr = c.sftpCli.Stat(dirPath)
+		if statErr != nil {
+			if fnErr := walkFn(dirPath, nil, statErr); fnErr != nil && fnErr != filepathSkipDir {
+				return fnErr
+			}
+			return nil
 		}
 	}
 
@@ -673,11 +781,22 @@ func (c *SSHClient) walk(dirPath string, walkFn walkFunc, info os.FileInfo) erro
 		return nil
 	}
 
-	entries, err := c.sftpCli.ReadDir(dirPath)
-	if err != nil {
-		return walkFn(dirPath, info, err)
+	entries, readErr := c.sftpCli.ReadDir(dirPath)
+	if readErr != nil {
+		// Report the error but allow walkFn to skip this directory
+		// (returns nil, or filepathSkipDir → continue) or abort (returns
+		// another error → stop). Either way this directory's subtree is done.
+		if fnErr := walkFn(dirPath, info, readErr); fnErr != nil && fnErr != filepathSkipDir {
+			return fnErr
+		}
+		return nil
 	}
 
+	// Note: entries for symlinks (including symlinks to directories) come
+	// back from ReadDir with IsDir()==false, since SFTP reports directory
+	// entries the way lstat would, without following links. They're handled
+	// as leaves via walkFn below rather than recursed into, which also means
+	// cyclic symlinks can't cause unbounded recursion here.
 	for _, entry := range entries {
 		childPath := path.Join(dirPath, entry.Name())
 		if entry.IsDir() {
@@ -696,12 +815,27 @@ func (c *SSHClient) walk(dirPath string, walkFn walkFunc, info os.FileInfo) erro
 // filepathSkipDir is used as a return value from Walk to skip a directory.
 var filepathSkipDir = fmt.Errorf("skip this directory")
 
+// isSymlinkToDir reports whether the walk entry at remotePath is a symlink
+// whose target is a directory. Such entries can't be copied with a plain
+// Open()/Create() file copy (the server rejects opening a directory for
+// reading), so callers use this to skip them instead of failing outright.
+func isSymlinkToDir(c *SSHClient, remotePath string, info os.FileInfo) bool {
+	if info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	target, err := c.Stat(remotePath)
+	return err == nil && target.IsDir()
+}
+
 // DirectorySize recursively walks a remote directory and sums up file sizes.
+// Unreadable subdirectories are skipped gracefully instead of aborting the entire walk.
 func (c *SSHClient) DirectorySize(dirPath string) (int64, error) {
 	var total int64
 	err := c.Walk(dirPath, func(_ string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			// Skip unreadable directories instead of aborting the walk.
+			// This handles permission-denied and other transient SFTP errors.
+			return filepathSkipDir
 		}
 		if !info.IsDir() {
 			total += info.Size()

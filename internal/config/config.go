@@ -9,6 +9,8 @@ import (
 	"syscall"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"vcom/internal/homedir"
 )
 
 type Config struct {
@@ -221,9 +223,9 @@ func resolvePath(explicitPath string) (string, bool, error) {
 	if explicitPath != "" {
 		candidates = append(candidates, explicitPath)
 	} else {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", false, fmt.Errorf("resolve home dir: %w", err)
+		homeDir := homedir.Dir()
+		if homeDir == "" {
+			return "", false, fmt.Errorf("cannot determine home directory")
 		}
 		xdgDir := os.Getenv("XDG_CONFIG_HOME")
 		if xdgDir == "" {
@@ -261,9 +263,9 @@ func isMissingPathError(err error) bool {
 }
 
 func DefaultUserPath() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+	homeDir := homedir.Dir()
+	if homeDir == "" {
+		return "", fmt.Errorf("cannot determine home directory")
 	}
 	xdgDir := os.Getenv("XDG_CONFIG_HOME")
 	if xdgDir == "" {

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"vcom/internal/homedir"
 )
 
 // SessionState stores the UI state that should be restored on next launch.
@@ -24,9 +26,9 @@ type PaneSession struct {
 
 // DefaultSessionPath returns the path to the session file.
 func DefaultSessionPath() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+	homeDir := homedir.Dir()
+	if homeDir == "" {
+		return "", fmt.Errorf("cannot determine home directory")
 	}
 	xdgDir := os.Getenv("XDG_CONFIG_HOME")
 	if xdgDir == "" {

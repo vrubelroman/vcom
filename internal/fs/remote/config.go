@@ -6,13 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"vcom/internal/homedir"
 )
 
 // ParseSSHConfig parses ~/.ssh/config and returns a list of SSH hosts.
 // It handles the most common SSH config directives: Host, HostName, Port, User, IdentityFile.
 func ParseSSHConfig() []SSHHost {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	home := homedir.Dir()
+	if home == "" {
 		return nil
 	}
 
@@ -129,8 +131,8 @@ func resolveIdentityPath(path string) string {
 
 	// Handle ~/ or $HOME/
 	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
+		home := homedir.Dir()
+		if home == "" {
 			return path
 		}
 		path = filepath.Join(home, path[2:])
@@ -138,8 +140,8 @@ func resolveIdentityPath(path string) string {
 
 	// Handle relative paths (relative to ~/.ssh/)
 	if !filepath.IsAbs(path) {
-		home, err := os.UserHomeDir()
-		if err != nil {
+		home := homedir.Dir()
+		if home == "" {
 			return path
 		}
 		path = filepath.Join(home, ".ssh", path)
@@ -150,8 +152,8 @@ func resolveIdentityPath(path string) string {
 
 // SSHConfigPath returns the path to the user's SSH config file.
 func SSHConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	home := homedir.Dir()
+	if home == "" {
 		return ""
 	}
 	return filepath.Join(home, ".ssh", "config")
@@ -159,8 +161,8 @@ func SSHConfigPath() string {
 
 // HostsFilePath returns the path to the custom hosts data file.
 func HostsFilePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	home := homedir.Dir()
+	if home == "" {
 		return ""
 	}
 	return filepath.Join(home, ".config", "vcom", "hosts.dat")
@@ -168,8 +170,8 @@ func HostsFilePath() string {
 
 // GetSSHDir returns the path to the .ssh directory.
 func GetSSHDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	home := homedir.Dir()
+	if home == "" {
 		return ""
 	}
 	return filepath.Join(home, ".ssh")
@@ -177,8 +179,8 @@ func GetSSHDir() string {
 
 // KnownHostsPath returns the path to known_hosts.
 func KnownHostsPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	home := homedir.Dir()
+	if home == "" {
 		return ""
 	}
 	return filepath.Join(home, ".ssh", "known_hosts")
